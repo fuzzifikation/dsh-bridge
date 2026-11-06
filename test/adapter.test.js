@@ -59,10 +59,10 @@ let outbox
 let activeDir
 let adapter
 
-async function setup(snapshotMutate) {
+async function setup(snapshotMutate, extraDeps = {}) {
   const snapshot = buildSnapshot(backend.url)
   snapshotMutate?.(snapshot)
-  adapter = createVllmcAdapter({ core, snapshot, deps: { outboxDir: outbox, activeDir, log: quietLog } })
+  adapter = createVllmcAdapter({ core, snapshot, deps: { outboxDir: outbox, activeDir, log: quietLog, ...extraDeps } })
 }
 
 function options(over = {}) {
@@ -391,5 +391,120 @@ describe('catalog for the GUI', () => {
     const withModes = await adapter.resolveModel('vllmc', 'modes')
     expect(withModes.reasoning.efforts.map((e) => e.id)).toEqual(['fast', 'smart'])
     expect(withModes.reasoning.defaultEffort).toBe('smart')
+  })
+})
+
+describe('image forwarding', () => {
+  const pngBytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  const pngUrl = `data:image/png;base64,${Buffer.from(pngBytes).toString('base64')}`
+  const ref = { attachmentId: 'sha256:0123456789abcdef', mediaType: 'image/png', bytes: 8, width: 64, height: 32, name: 'shot.png' }
+
+  function withVision(snapshot) {
+    snapshot.config.models.push({
+      id: 'vision',
+      server: 's1',
+      vllmModelId: 'demo-model',
+      maxOutputTokens: 128,
+      capabilities: { toolCalling: true, imageInput: true },
+    })
+  }
+
+  function fakeStore(readImage) {
+    const calls = []
+    return {
+      calls,
+      readImage: async (r, signal) => {
+        calls.push(r.attachmentId)
+        if (readImage) return readImage(r)
+        return { ref: r, data: pngBytes }
+      },
+    }
+  }
+
+  function imageTurn(extra = []) {
+    return [{ role: 'user', content: [{ type: 'text', text: 'look:' }, { type: 'image', attachment: ref }, ...extra] }]
+  }
+
+  it('catches the modality lie: imageInput capabilities reach the catalog and the resolved route', async () => {
+    await setup(withVision)
+    const models = await adapter.listModels('vllmc')
+    expect(models.find((m) => m.id === 'vision').inputModalities).toEqual(['text', 'image'])
+    expect(models.find((m) => m.id === 'm1').inputModalities).toEqual(['text'])
+    const resolved = await adapter.resolveModel('vllmc', 'vision')
+    expect(resolved.inputModalities).toEqual(['text', 'image'])
+  })
+
+  it('catches the blind eye: a pasted image reaches the wire as an image_url data URL', async () => {
+    const store = fakeStore()
+    await setup(withVision, { resolveAttachments: () => store })
+    await collect(adapter.stream(options({ model: 'vision', messages: imageTurn() })))
+    expect(userTurn(backend.requests.at(-1).body).content).toEqual([
+      { type: 'text', text: 'look:' },
+      { type: 'image_url', image_url: { url: pngUrl } },
+    ])
+    expect(store.calls).toEqual([ref.attachmentId])
+  })
+
+  it('catches the capability lie: a text-only model never reads the store and keeps the string placeholder', async () => {
+    const store = fakeStore()
+    await setup(withVision, { resolveAttachments: () => store })
+    await collect(adapter.stream(options({ messages: imageTurn() })))
+    expect(store.calls).toEqual([])
+    expect(userTurn(backend.requests.at(-1).body).content).toBe('look:[image attached to this message; not forwarded by the bridge]')
+  })
+
+  it('catches the fake eye: a vision model without an attachment service degrades to honest text', async () => {
+    await setup(withVision)
+    await collect(adapter.stream(options({ model: 'vision', messages: imageTurn() })))
+    expect(userTurn(backend.requests.at(-1).body).content).toBe('look:[image attached to this message; not forwarded by the bridge]')
+  })
+
+  it('catches the corrupt-bytes failure: one unreadable attachment placeholders, the turn still runs', async () => {
+    const store = fakeStore(() => {
+      throw new Error('attachment purged')
+    })
+    await setup(withVision, { resolveAttachments: () => store })
+    const chunks = await collect(adapter.stream(options({ model: 'vision', messages: imageTurn() })))
+    expect(chunks.at(-1).reason).toEqual({ kind: 'stop' })
+    expect(userTurn(backend.requests.at(-1).body).content).toContain('not forwarded by the bridge')
+  })
+
+  it('catches re-reading an offloaded image: offloaded occurrences use harness text, the store stays untouched', async () => {
+    const store = fakeStore()
+    await setup(withVision, { resolveAttachments: () => store })
+    await collect(
+      adapter.stream(
+        options({
+          model: 'vision',
+          messages: [{ role: 'user', content: [{ type: 'image', attachment: ref, offloaded: true }] }],
+        }),
+      ),
+    )
+    expect(store.calls).toEqual([])
+    const content = userTurn(backend.requests.at(-1).body).content
+    expect(typeof content).toBe('string')
+    expect(content).toContain('image omitted to fit request image limits')
+  })
+
+  it('catches the dropped screenshot: an image in a tool result replays as wire parts', async () => {
+    const store = fakeStore()
+    await setup(withVision, { resolveAttachments: () => store })
+    await collect(
+      adapter.stream(
+        options({
+          model: 'vision',
+          messages: [
+            { role: 'user', content: [{ type: 'text', text: 'read it' }] },
+            { role: 'assistant', content: [{ type: 'tool-call', id: 'call_r', name: 'read_image', arguments: '{"path":"a.png"}' }] },
+            { role: 'tool', toolCallId: 'call_r', content: [{ type: 'text', text: 'PNG 64x32' }, { type: 'image', attachment: ref }] },
+          ],
+        }),
+      ),
+    )
+    const toolMsg = backend.requests.at(-1).body.messages.find((m) => m.role === 'tool')
+    expect(toolMsg.content).toEqual([
+      { type: 'text', text: 'PNG 64x32' },
+      { type: 'image_url', image_url: { url: pngUrl } },
+    ])
   })
 })

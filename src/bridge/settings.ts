@@ -32,6 +32,12 @@ export interface RegistryModel {
   vllmModelId?: string
   displayName?: string
   server: string
+  /** Capability flags as the vLLM-Copilot config declares them. The adapter
+   *  reads `imageInput` for two decisions: what dsh's picker advertises as
+   *  input modalities, and whether image blocks are resolved to bytes at all.
+   *  Declared here so the pass-through is a named contract, not an accident;
+   *  the round trip through the snapshot is tripwired in bridge.test.js. */
+  capabilities?: { toolCalling?: boolean; imageInput?: boolean }
   maxOutputTokens?: number | number[]
   contextWindow?: number
   defaultParams?: Record<string, unknown>

@@ -1,6 +1,6 @@
 {
   "name": "@fuzzifikation/dsh-adapter-vllmc",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "dsh adapter plugin routing every generation through the vLLM-Copilot core.",
   "private": true,
   "type": "module",

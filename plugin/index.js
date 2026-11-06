@@ -36,6 +36,17 @@ export function apply(ctx) {
     outboxDir: path.join(path.dirname(file), 'usage-outbox'),
     activeDir: path.join(path.dirname(file), 'active'),
     log: { appendLine: (line) => ctx.logger.info(`[vllmc] ${line}`) },
+    // The durable image bytes live in the harness attachment service, the same
+    // service dsh's own routes pull from via ctx.get('attachments'). Absent
+    // service is not fatal: image occurrences project to honest placeholder
+    // text, never fabricated descriptions.
+    resolveAttachments: () => {
+      try {
+        return typeof ctx.get === 'function' ? ctx.get('attachments') : undefined
+      } catch {
+        return undefined
+      }
+    },
   }
   return import('vllm-copilot-core').then((core) => {
     const adapter = createVllmcAdapter({ core, snapshot, deps: adapterDeps })

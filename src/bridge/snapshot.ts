@@ -26,6 +26,10 @@ export interface SnapshotServer {
 export interface SnapshotModel {
   id: string
   server: string
+  /** Carried verbatim from the registry entry (see RegistryModel): the
+   *  adapter gates vision on `capabilities.imageInput`, so a build step that
+   *  cherry-picked fields would silently blind every vision model. */
+  capabilities?: { toolCalling?: boolean; imageInput?: boolean }
   [key: string]: unknown
 }
 

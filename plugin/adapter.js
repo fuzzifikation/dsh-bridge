@@ -4,13 +4,18 @@
  * routing, personalities) comes from the vLLM-Copilot snapshot, ruling 6;
  * the harness never reaches a backend directly and dsh `compat` stays unset.
  */
-import { LlmAdapter, LlmError, isContextWindowExceededError, isQuotaExceededError } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, LlmError, isContextWindowExceededError, isQuotaExceededError, offloadedImageText } from '@deepseek-ai/dsh-llm'
 import path from 'node:path'
 import { toWireMessages, toRequestTools } from './project.js'
 import { toDshUsage, writeUsageRecord } from './usage-convert.js'
 import { activeTracker } from './active.js'
 
 const PROVIDER = 'vllmc'
+
+/** The one modality rule, so the catalog and the resolved route can never disagree. */
+function modalitiesOf(imageInput) {
+  return imageInput === true ? ['text', 'image'] : ['text']
+}
 
 export function createVllmcAdapter({ core, snapshot, deps = {} }) {
   const log = deps.log ?? { appendLine: () => {} }
@@ -59,6 +64,53 @@ export function createVllmcAdapter({ core, snapshot, deps = {} }) {
     })
   }
 
+  /**
+   * Pre-resolve the request's image blocks into data URLs keyed by attachment
+   * id, the way dsh's own routes do it: bytes come only from the durable
+   * attachment service, never from a path the message text could name. A
+   * vision-declared model without a visible service, or one unreadable
+   * attachment, degrades that occurrence to honest placeholder text — the wire
+   * shape the bridge shipped before vision existed, never a silent drop.
+   */
+  async function collectImageDataUrls(options, allowImages, signal) {
+    const urls = new Map()
+    if (allowImages !== true) return urls
+    const refs = new Map()
+    for (const message of options.messages ?? []) {
+      for (const block of Array.isArray(message.content) ? message.content : []) {
+        if (block?.type === 'image' && block.offloaded !== true && block.attachment?.attachmentId) {
+          refs.set(block.attachment.attachmentId, block.attachment)
+        }
+      }
+    }
+    if (refs.size === 0) return urls
+    const attachments = deps.resolveAttachments?.()
+    if (!attachments) {
+      log.appendLine(`${refs.size} image(s) in request but no attachment service is visible to the plugin; projecting placeholder text`)
+      return urls
+    }
+    for (const [id, ref] of refs) {
+      try {
+        const stored = await attachments.readImage(ref, signal)
+        urls.set(id, `data:${stored.ref.mediaType};base64,${Buffer.from(stored.data).toString('base64')}`)
+      } catch (err) {
+        log.appendLine(`image ${id} could not be read (${err?.message ?? err}); projecting placeholder text`)
+      }
+    }
+    return urls
+  }
+
+  /** The synchronous per-block answers project.js renders from. */
+  function imageResolverFrom(urls) {
+    return (block) => {
+      if (block.offloaded === true && block.attachment) {
+        return { text: offloadedImageText(block.attachment) }
+      }
+      const url = urls.get(block.attachment?.attachmentId)
+      return url ? { url } : undefined
+    }
+  }
+
   function mapError(err) {
     if (err instanceof LlmError) return err
     const message = err?.message ?? String(err)
@@ -81,7 +133,7 @@ export function createVllmcAdapter({ core, snapshot, deps = {} }) {
         provider: PROVIDER,
         id: model.id,
         name: model.displayName ?? model.id,
-        inputModalities: ['text'],
+        inputModalities: modalitiesOf(model.capabilities?.imageInput),
       }))
     }
 
@@ -91,7 +143,7 @@ export function createVllmcAdapter({ core, snapshot, deps = {} }) {
         provider: PROVIDER,
         id: model,
         name: descriptor.name,
-        inputModalities: ['text'],
+        inputModalities: modalitiesOf(descriptor.capabilities?.imageInput),
         context: { contextWindow: descriptor.contextWindow },
         defaultMaxTokens: descriptor.maxOutputTokens,
         reasoning: descriptor.modeNames
@@ -133,7 +185,10 @@ export function createVllmcAdapter({ core, snapshot, deps = {} }) {
 
         const descriptor = await describe(modelId, selectedMode)
 
-        const { messages } = toWireMessages(options)
+        // Bytes before projection: the attachment service is the only source,
+        // and only for a model whose registry capability says it can see.
+        const imageUrls = await collectImageDataUrls(options, descriptor.capabilities?.imageInput, signal)
+        const { messages } = toWireMessages(options, imageResolverFrom(imageUrls))
         const rules = await personality()
         if (rules.length > 0) {
           for (const message of messages) {

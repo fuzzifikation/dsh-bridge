@@ -3,33 +3,91 @@
  * core's OpenAI wire vocabulary. Input is deep-frozen by the loop: every result
  * is a freshly built object, and no field is ever written back.
  *
- * Gate-2 scope: text, reasoning, tool calls/results. Images and file attachments
- * project to stable placeholder text (real attachment handling is later work;
- * silently dropping them would make the model lie about what it sees).
+ * Image handling: the adapter pre-resolves image blocks through the harness
+ * attachment service and hands this layer a synchronous resolver; a forwarded
+ * image becomes an OpenAI `image_url` part on the roles the wire tolerates
+ * (user, tool — the same role set dsh's own pi-ai route admits). Anything the
+ * resolver cannot serve (offloaded occurrence, unreadable bytes, a model that
+ * does not declare image input) projects to stable placeholder text: silently
+ * dropping attachments would make the model lie about what it sees. File
+ * attachments stay placeholder text for now (the wire has no file part).
  */
+
+const IMAGE_PLACEHOLDER = '[image attached to this message; not forwarded by the bridge]'
+const FILE_PLACEHOLDER = '[file attached to this message; not forwarded by the bridge]'
 
 function blocksOf(content) {
   if (typeof content === 'string') return content ? [{ type: 'text', text: content }] : []
   return Array.isArray(content) ? content : []
 }
 
-function blocksToText(blocks) {
+/** Resolver answer for one image block, falling back to the generic placeholder. */
+function imageText(block, served) {
+  return typeof served?.text === 'string' ? served.text : IMAGE_PLACEHOLDER
+}
+
+function blocksToText(blocks, resolveImage) {
   const parts = []
   for (const block of blocksOf(blocks)) {
     if (block.type === 'text') parts.push(block.text ?? '')
-    else if (block.type === 'image') parts.push('[image attached to this message; not forwarded by the bridge]')
-    else if (block.type === 'file') parts.push('[file attached to this message; not forwarded by the bridge]')
+    else if (block.type === 'image') parts.push(imageText(block, resolveImage?.(block)))
+    else if (block.type === 'file') parts.push(FILE_PLACEHOLDER)
     // reasoning/tool-call/tool-addition/tool-removal are handled per-role, not as text
   }
   return parts.join('')
 }
 
 /**
+ * Content projection for image-bearing roles. String content exactly as before
+ * when nothing can be forwarded; a parts array only once an image actually
+ * resolves, so text-only traffic stays byte-identical to the pre-vision wire.
+ * @param resolveImage - (block) => { url } | { text } | undefined, see toWireMessages.
+ */
+function blocksToContent(blocks, resolveImage) {
+  const list = blocksOf(blocks)
+  const served = new Map()
+  for (const block of list) {
+    if (block.type === 'image') served.set(block, resolveImage?.(block))
+  }
+  const hasForwardable = [...served.values()].some((answer) => typeof answer?.url === 'string')
+  if (!hasForwardable) {
+    return blocksToText(list, resolveImage ? (block) => served.get(block) : undefined)
+  }
+  const parts = []
+  let text = ''
+  const flush = () => {
+    if (text) {
+      parts.push({ type: 'text', text })
+      text = ''
+    }
+  }
+  for (const block of list) {
+    if (block.type === 'text') text += block.text ?? ''
+    else if (block.type === 'file') text += FILE_PLACEHOLDER
+    else if (block.type === 'image') {
+      const answer = served.get(block)
+      if (typeof answer?.url === 'string') {
+        flush()
+        parts.push({ type: 'image_url', image_url: { url: answer.url } })
+      } else {
+        text += imageText(block, answer)
+      }
+    }
+    // reasoning/tool-call blocks are handled per-role elsewhere, never as content parts
+  }
+  flush()
+  return parts
+}
+
+/**
  * @param options - dsh GenerateOptions (never mutated).
+ * @param resolveImage - optional (block) => { url: string } to forward one
+ * image block as a data URL, { text: string } to render it with honest text,
+ * or undefined for the generic placeholder. Absent resolver = text-only bridge.
  * @returns {{ messages: object[], notice?: string }} fresh wire messages; a
  * leading one-shot `system` string becomes the first system message.
  */
-export function toWireMessages(options) {
+export function toWireMessages(options, resolveImage) {
   const out = []
   if (typeof options.system === 'string' && options.system.length > 0) {
     out.push({ role: 'system', content: options.system })
@@ -38,12 +96,12 @@ export function toWireMessages(options) {
     const blocks = blocksOf(message.content)
     switch (message.role) {
       case 'system':
-        out.push({ role: 'system', content: blocksToText(blocks) })
+        out.push({ role: 'system', content: blocksToText(blocks, resolveImage) })
         break
       case 'user':
       case 'developer':
         // The wire has no developer role; instruction-shaped context stays model-visible as user text.
-        out.push({ role: 'user', content: blocksToText(blocks) })
+        out.push({ role: 'user', content: blocksToContent(blocks, resolveImage) })
         break
       case 'assistant': {
         let text = ''
@@ -67,11 +125,13 @@ export function toWireMessages(options) {
         break
       }
       case 'tool': {
-        const text = blocksToText(blocks)
+        // Images in tool results (read_image, screenshots) forward as parts,
+        // mirroring dsh's own pi-ai route, which admits user and tool images.
+        const text = blocksToContent(blocks, resolveImage)
         out.push({
           role: 'tool',
           tool_call_id: message.toolCallId,
-          content: message.isError ? `Error: ${text}` : text,
+          content: message.isError && typeof text === 'string' ? `Error: ${text}` : text,
         })
         break
       }

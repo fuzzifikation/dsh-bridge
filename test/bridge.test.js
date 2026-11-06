@@ -66,6 +66,33 @@ describe('snapshot: bridge writes what the plugin reads', () => {
     expect(doc.config.models).toHaveLength(2)
   })
 
+  it('catches the vision wipe: capability flags survive the re-key and reach the plugin', () => {
+    // Real breakage this catches: a build step that cherry-picks fields would
+    // drop `capabilities`, the adapter's gate would read imageInput=false,
+    // and every pasted screenshot degrades to placeholder text while the
+    // model cheerfully lies about what it sees. The pass-through is the only
+    // thing carrying vision, so the whole round trip is proven here.
+    const withVision = {
+      servers: registry.servers,
+      models: [
+        { ...registry.models[0], capabilities: { toolCalling: true, imageInput: true } },
+        registry.models[1],
+      ],
+    }
+    const payload = buildSnapshot({ ...withVision, defaultModelId: 'm-1' })
+    const doc = plugin.parseSnapshot(
+      JSON.stringify({ version: plugin.SNAPSHOT_VERSION, ...payload }),
+      'vision round trip',
+    )
+    expect(doc.config.models.find((m) => m.id === 'Big Model').capabilities).toEqual({
+      toolCalling: true,
+      imageInput: true,
+    })
+    // A model without the field stays without it: absent is not false, the
+    // adapter's core-computed default (text-only) applies unchanged.
+    expect(doc.config.models.find((m) => m.id === 'Small Model').capabilities).toBeUndefined()
+  })
+
   it('is a no-op while the registry is unchanged and rewrites when it changes', () => {
     const p = paths()
     const payload = buildSnapshot({ ...registry, defaultModelId: 'm-1' })
