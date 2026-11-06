@@ -28,6 +28,7 @@ import { registerDefaultWorkspace } from './workspace.js'
 import type { LedgerPort } from './api.js'
 import type { BridgePaths } from './paths.js'
 import { ensureBridgeDirs, legacyHomeDirs } from './paths.js'
+import { appendServedUrl, servedUrlsFile } from './served-urls.js'
 
 export interface BridgeLog {
   info(message: string): void
@@ -365,6 +366,17 @@ export class Bridge {
    * and shoot each other's harness through the sweep.
    */
   async start(): Promise<string> {
+    const url = await this.acquire()
+    // Remember every URL this harness answers on. Port and token die with
+    // every boot, so the NEXT boot's restored browser tab points here, cannot
+    // connect, and a fail-load browser view in VS Code 1.140 hides the
+    // window's menus. The history is how the next window's stale-tab sweep
+    // recognises its own zombies (served-urls.ts).
+    appendServedUrl(servedUrlsFile(this.deps.paths.vllmc), url, this.deps.log)
+    return url
+  }
+
+  private async acquire(): Promise<string> {
     const first = await this.adoptCandidate()
     if (first) {
       const url = await this.adopt(first)

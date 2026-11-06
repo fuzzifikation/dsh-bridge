@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.17
+
+- **Harness tabs no longer come back from the dead.** The embedded harness view now closes when the harness stops, restarts, or the window shuts down, instead of lingering until the next boot, where the dead address would hide the window's menus. The status-bar pill reopens it in one click.
+
+## 0.0.16
+
+- **Menus work again after restarts.** A harness tab left open across a restart can never reconnect (the harness gets a fresh address every launch), and VS Code's built-in browser hides the window's menus while showing that error page. The bridge now closes those stale tabs itself at startup; the command "Close Stale Harness Browser Tabs" does it by hand if ever needed.
+
 ## 0.0.15
 
 First public version. The bridge runs the [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) (dsh) entirely on your vLLM-Copilot registry: same models, servers, sampling configs, and personalities, no DeepSeek account and no vendor login. dsh itself stays 100% upstream.

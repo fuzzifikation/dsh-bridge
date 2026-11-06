@@ -1,7 +1,7 @@
 {
   "name": "dsh-vllm-bridge",
   "displayName": "DeepSeek Harness Bridge (vLLM, local)",
-  "version": "0.0.15",
+  "version": "0.0.17",
   "type": "module",
   "description": "Runs the DeepSeek Harness (dsh) entirely on your vLLM-Copilot registry: your models, your servers, your token totals, no DeepSeek account.",
   "license": "MIT",
@@ -81,6 +81,11 @@
       {
         "command": "dshBridge.report",
         "title": "Show Bridge Status",
+        "category": "DSH Bridge"
+      },
+      {
+        "command": "dshBridge.sweepStaleTabs",
+        "title": "Close Stale Harness Browser Tabs",
         "category": "DSH Bridge"
       }
     ],

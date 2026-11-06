@@ -14,6 +14,7 @@ import { createCoreCatalogSource } from './bridge/core-catalog.js'
 import type { McpTool } from './bridge/mcp.js'
 import { readBridgeSettings, readMainRegistry, mainExtensionInstalled, MAIN_EXT_ID } from './bridge/settings.js'
 import { drainActiveRequests } from './bridge/ingest.js'
+import { originAnswers, readServedHostPorts, servedUrlsFile } from './bridge/served-urls.js'
 
 const RESTART_DEBOUNCE_MS = 1500
 /** Deactivate must not hold the extension host hostage, unlike a deliberate restart. */
@@ -470,6 +471,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     coreCatalog: catalogSource,
     onUnexpectedExit: (info) => {
       render()
+      // The URL died with the server; a tab nobody can serve is tomorrow's
+      // poisoned boot, so bury it now. The pill reopens the harness in a click.
+      sweepNow()
       void vscode.window
         .showWarningMessage(
           `The DeepSeek Harness exited on its own (code ${info.code}, signal ${info.signal}). The bridge log has the last output.`,
@@ -568,6 +572,107 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   render()
   status.show()
 
+  /**
+   * Stale embedded tabs kill the window's menus, and the harness manufactures
+   * them by design: port and token are reissued every boot, so a harness tab
+   * restored after a restart can never connect. In VS Code 1.140 the browser
+   * tab is a native Electron child view, and a restored fail-load one breaks
+   * the window's menu layer (owner-reproduced 2026-10-11: tab open across a
+   * restart equals dead menus; closing the tab afterwards does NOT heal the
+   * menus, only a window reload does; upstream sibling
+   * microsoft/vscode#317715). The bridge cannot prevent the restore and
+   * cannot heal the latched damage, so this sweep is prevention for future
+   * boots, executed the moment the bridge wakes: it closes exactly its own
+   * zombies, and a closed tab is never restored. Nothing else is ever
+   * touched: tabs match on loopback host:ports we ourselves served, and
+   * never while the origin answers anything.
+   */
+  async function sweepStaleTabs(): Promise<number> {
+    const hostPorts = readServedHostPorts(servedUrlsFile(paths.vllmc))
+    let closed = 0
+    for (const hostPort of hostPorts) {
+      for (;;) {
+        if (!tabGroupShowing(hostPort)) break
+        if (await originAnswers(hostPort)) {
+          logger.info(`keeping the browser tab on ${hostPort}: something answers there now`)
+          break
+        }
+        if (!(await closeStaleTab(hostPort))) {
+          logger.warn(`could not close the stale harness tab on ${hostPort}: close it by hand, then reload the window to bring its menus back`)
+          break
+        }
+        closed += 1
+        logger.info(`closed the stale harness tab on ${hostPort}: its URL died with the last session`)
+      }
+    }
+    if (closed)
+      logger.info(
+        `stale-tab sweep: closed ${closed} dead harness tab(s); the next session starts clean, and if this window's menus are hidden, one "Developer: Reload Window" brings them back`,
+      )
+    return closed
+  }
+
+  /** Browser tabs carry the origin as label, so `127.0.0.1:port` IS the match. */
+  function tabGroupShowing(label: string): vscode.TabGroup | undefined {
+    for (const group of vscode.window.tabGroups.all) {
+      if (group.tabs.some((tab) => tab.label === label)) return group
+    }
+    return undefined
+  }
+
+  /**
+   * 1.140 ships no command that closes one NAMED tab (`workbench.action.closeTabs`
+   * is absent from the build, verified against every bundle chunk), so the
+   * close walks to the tab: cycle groups until the target's group is active,
+   * cycle tabs inside it until the target is active, close the active editor.
+   * Focus is a suggestion, not a promise, so reality is re-read after every
+   * step and the walk is bounded. This dance is Microsoft's fault, not ours.
+   */
+  async function closeStaleTab(label: string): Promise<boolean> {
+    const nap = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+    for (let step = 0; step < 24; step += 1) {
+      const group = tabGroupShowing(label)
+      if (!group) return true
+      const active = vscode.window.tabGroups.activeTabGroup
+      if (active.viewColumn === group.viewColumn && active.activeTab?.label === label) {
+        await vscode.commands.executeCommand('workbench.action.closeActiveEditor')
+        await nap(400)
+      } else {
+        await vscode.commands.executeCommand(
+          active.viewColumn === group.viewColumn ? 'workbench.action.nextEditorInGroup' : 'workbench.action.focusNextGroup',
+        )
+        await nap(60)
+      }
+    }
+    return !tabGroupShowing(label)
+  }
+
+  /** Fire the sweep without ever blocking or rejecting a caller. */
+  function sweepNow(): void {
+    void sweepStaleTabs().catch((err: Error) => logger.warn(`stale-tab sweep failed: ${err.message}`))
+  }
+
+  // The sweep runs before anything else spends time: every second a fail-load
+  // view sits in the window is a second the user cannot open a menu.
+  sweepNow()
+
+  /**
+   * Shutdown variant: close this window's harness tabs whether or not the
+   * origin still answers, because no server will own that URL in the NEXT
+   * session, and only a tab that was never restored cannot poison a boot.
+   * Best effort: the host may not wait for the focus walk, and whatever
+   * survives is exactly what the next activation's sweep was built for.
+   */
+  async function closeOwnEmbeddedTabs(): Promise<void> {
+    for (const hostPort of readServedHostPorts(servedUrlsFile(paths.vllmc))) {
+      for (;;) {
+        if (!tabGroupShowing(hostPort)) break
+        if (!(await closeStaleTab(hostPort))) break
+        logger.info(`closed the harness tab on ${hostPort} before shutdown: dead URLs must not survive into the next session`)
+      }
+    }
+  }
+
   async function guardedStart(): Promise<string | undefined> {
     if (bridge.supervisor.running && bridge.supervisor.url) return bridge.supervisor.url
     // Best effort: a harness whose control channel failed to start still
@@ -624,6 +729,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
         await bridge.restart()
         render()
+        // A restart reissues port and token, so the open tab just became a
+        // corpse with a live-looking page. Sweep before the window can quit
+        // with it and restore a dead URL into the next session.
+        sweepNow()
       })()
     }, RESTART_DEBOUNCE_MS)
   }
@@ -746,10 +855,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         void vscode.window.showWarningMessage(`${result.remaining} in-flight harness request(s) were cut by this stop.`)
       }
       render()
+      // The tab's server is gone by the user's own hand: close the tab too.
+      sweepNow()
     }),
     vscode.commands.registerCommand('dshBridge.restart', async () => {
       await bridge.restart()
       render()
+      sweepNow()
     }),
     vscode.commands.registerCommand('dshBridge.open', async () => {
       const url = bridge.supervisor.url ?? (await guardedStart())
@@ -762,6 +874,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       output?.show()
     }),
     vscode.commands.registerCommand('dshBridge.report', () => showReport()),
+    // Visible on purpose: if a stale harness tab ever eats the menus again
+    // (ours or a restored one the sweep missed), this is the recovery button
+    // a keyboard user can reach without a mouse menu, and the rail's handle
+    // on the exact production path.
+    vscode.commands.registerCommand('dshBridge.sweepStaleTabs', async () => {
+      await sweepStaleTabs()
+    }),
   )
 
   // The main extension is expected but not required: with it absent the harness
@@ -809,6 +928,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Deactivate is best effort: it does not run at all when the host dies,
     // which is what the start-time reap of detached survivors is for.
     dispose: () => {
+      // Tabs die with the session, unconditionally and first: a restored
+      // fail-load browser view poisons the window's menus before any
+      // extension can react (docs/upstream-issues.md section 3), and menu
+      // damage latches until a reload, so prevention is the only cure.
+      void closeOwnEmbeddedTabs().catch(() => {})
       // A borrowed harness belongs to a window that is still open: closing
       // this one must leave it, its pid record, and its detached servers
       // running. Only the window that spawned the harness may end it.
