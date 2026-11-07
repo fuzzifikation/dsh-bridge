@@ -179,3 +179,17 @@ display keys honored, and the e2e ledger double wraps the real
 `ingestExternalUsage`. The dev loop closes without any tag or publish via
 `scripts/stage-core.mjs --dir ..\vLLM-Copilot-public`. Status per item lives
 in the bridge's own `docs/vllm-copilot-integration.md` (Adoption status).
+
+## Harness surface (current architecture, 2026-11-07)
+
+The harness ships as a chromeless editor surface: a `WebviewPanel` whose entire pane is the GUI, framed through a local embed proxy. The user-visible spec and its feel-invariants live in [ui-ux.md](./ui-ux.md); the decision history is the journal ([plan.md](./plan.md), "Chromeless panel era"). These are the mechanism and security laws the surface rests on — they bind every future change:
+
+1. **The session cookie never enters the webview.** The loopback proxy (`src/bridge/embed-proxy.ts`) performs the token login's 303 chain itself, keeps the `HttpOnly; SameSite=Strict` session in a server-side jar, injects it on forwarded requests, and strips `Set-Cookie` from responses. The permanently rejected variant is rewriting cookie attributes on the wire (owner ruling 2026-10-05, superseded mechanism noted 2026-11-07): owning the session in a jar is a different mechanism and the only one allowed.
+2. **The frame is same-origin with the proxy.** The webview document never dials the harness port; the panel CSP is `default-src 'none'` plus `frame-src` the proxy plus its inline listener.
+3. **The panel URL is the proxy's stable port** (`dsh-bridge.embedPort`, default 43171, ephemeral fallback) and survives harness restarts by retarget-and-reload. Panel URLs carrying a harness port or token are banned: restart-proofing and revival rest on this.
+4. **Injection scope is exactly the index**: 200 + text/html + path `/`; `accept-encoding` is dropped on forwarding so that body arrives as text. No other response is ever touched.
+5. **The title beacon reports twice** — same-origin `GET /__dsh-title?v=<per-load view id>&t=…` (pre-auth, write-only, 204) and `parent.postMessage` through the panel shell; either arrival renames the tab. Standing rule extracted from the first live failure: a fragile hop never ships without a log at its receiving end.
+6. **Keyboard priority belongs to the harness.** Only modifier chords the page did not `preventDefault` are forwarded, the extension executes a small whitelist of VS Code commands itself (1.145 has no webview keyboard protocol), and a setting disables the whole bridge.
+7. **Response framing is Node's own**: upstream `transfer-encoding`/`content-length` are never copied into proxied responses.
+8. **The proxy binds 127.0.0.1 only, has zero npm dependencies and no vscode import** — it runs and is tested standalone.
+9. **One adoption path** serves fresh creation and serializer revival alike (view id per load, waiting card until the harness is reachable).

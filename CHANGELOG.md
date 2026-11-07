@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **The harness is now an editor tab, not a browser page.** It opens chromeless inside VS Code (default `panel`): no address bar, and each tab is named after the conversation it shows (`DSH — <chat>`). The view's address survives harness restarts, and tabs come back on their own after window reloads.
+- **Several harness views.** The `+` in the tab's title bar (or "DSH: Open Another Harness View") opens a second full GUI with its own session selection; views split, and "Move into New Window" gives a chat a window of its own.
+- **VS Code shortcuts answer from inside the harness**: `F1`/`Ctrl+Shift+P`, `Ctrl+P`, `Ctrl+B`, `Ctrl+,`, `Ctrl+W` and friends work wherever the cursor is — and every shortcut the harness handles itself stays the harness's.
+- New settings: `dsh-bridge.openIn` (default `panel`; also `appWindow`, `embedded`, `external`), `dsh-bridge.embedPort` (stable panel address), `dsh-bridge.keyboardBridge`, and `dsh-bridge.logLevel` (`debug` mirrors harness chatter for diagnostics).
+
 ## 0.0.17
 
 - **Harness tabs no longer come back from the dead.** The embedded harness view now closes when the harness stops, restarts, or the window shuts down, instead of lingering until the next boot, where the dead address would hide the window's menus. The status-bar pill reopens it in one click.

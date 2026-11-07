@@ -20,6 +20,14 @@ You install the extension. It installs a pinned `@deepseek-ai/dsh` into a privat
 
 Pre-alpha (0.0.x), one developer. The loop works end to end: your registry becomes the harness's model list, models your servers stopped serving are hidden, the harness opens as a chromeless tab inside VS Code — per-chat tab titles, VS Code chords answering from inside the frame — the agent can call editor tools (diagnostics, open files and diffs, terminal commands, questions back to you), and harness traffic lands in the vLLM-Copilot usage ledger. Windows is the tested platform; others are untested. The design law for this repo (architecture, owner rulings, verification gates) lives in [docs/dsh-bridge-plan.md](docs/dsh-bridge-plan.md), this repo's own since 2026-10-08.
 
+## Documentation
+
+- [docs/ui-ux.md](docs/ui-ux.md) — the surface as it must be: pill, tabs, titles, keyboard, settings, feel-invariants
+- [docs/dsh-bridge-plan.md](docs/dsh-bridge-plan.md) — design law: architecture, owner rulings, verification gates
+- [docs/plan.md](docs/plan.md) — dated decision journal (history, with the reasoning)
+- [docs/upstream-issues.md](docs/upstream-issues.md) — open asks to the harness and to VS Code
+- [CHANGELOG.md](CHANGELOG.md) — user-facing releases
+
 ## License
 
 MIT. Contains no code from other projects; if that ever changes, attribution lands in `THIRD-PARTY-NOTICES.txt`.
