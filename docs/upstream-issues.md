@@ -18,7 +18,15 @@ The web server's browser session cookie is `HttpOnly; SameSite=Strict` (dsh-clie
 
 Request: support `Partitioned` (CHIPS) cookies, which are exactly designed for authenticated loopback frames on trustworthy origins like `http://127.0.0.1`, or accept the session token through a header fallback for embedded clients. Either one makes "open the harness inside the editor without its own browser chrome" possible for every editor integration, not just ours.
 
-Current bridge posture: we open the harness in VS Code's built-in Browser area (top-level, cookie works, toolbar visible). A bridge-side proxy rewriting cookie attributes was evaluated and rejected.
+Current bridge posture: a cookie-jar reverse proxy (`bridge/embed-proxy.ts`) carries the session server-side, so a chromeless webview panel and a bar-less `--app` window work with no upstream change; attribute rewriting remains rejected (a rewriter cannot mint what Chromium refuses to store, and it would fake the browser's policy forever after). The proxy is a workaround, not a cure: CHIPS or the header fallback lets editor integrations drop the extra local hop entirely, and the panel's URL would then need no jar, no port, and no retarget dance on restart.
+
+## 3. No session URLs: the GUI cannot open “this session” from a link
+
+The web GUI is a one-URL app. Across every shipped client bundle the only `history.pushState`/`replaceState` user is PDF.js inside the document-preview sidebar; the active session lives purely in memory (`dsh-client-ui-session`), and a reload always lands on the default view. Editor shells built around tabs — VS Code webviews, every IDE's equivalent, or just a browser's tab bar — cannot show one session per tab, restore a webview onto the session the user was reading, or hand someone a link to a conversation. (The `__DSH_TRANSPORT__` embedding seam proves the shell is designed to be hosted; this is the routing half of the same door.)
+
+Request: reflect the active session in the URL (query parameter is enough — `<base href="./">` already makes the app proxy-tolerant) and honor it at boot; deep-linking into a sub-view later would be a bonus.
+
+Current bridge workaround: one chromeless panel per desired view — each a full GUI over the session-multiplexing bus, with its own in-app session selection. Good enough for two or three parallel chats; it is not a substitute for real links.
 
 ---
 
@@ -26,7 +34,7 @@ Current bridge posture: we open the harness in VS Code's built-in Browser area (
 
 Filed against a different upstream than the two above. Filed here locally first; file on microsoft/vscode only after the owner's live go, with a fresh `Help: Report Issue` system-info dump attached.
 
-## 3. A restored fail-load Browser tab hides every menu in the window (menus open behind the window)
+## 4. A restored fail-load Browser tab hides every menu in the window (menus open behind the window)
 
 Version observed: VS Code 1.140 (user build), Windows. No extension required to reproduce:
 
@@ -41,4 +49,4 @@ Evidence from our product (every byte here reproducible without it): a z-order r
 
 Request: repair the menu layer when such a view is destroyed or hidden, and ideally never let a child view outrank popup-weight DOM in the first place (hide or lower the native browser view while a workbench menu, quick pick, or context menu is up, the same dance every desktop app does with child windows).
 
-Current bridge posture: the DeepSeek Harness Bridge opens local harness UIs in this browser view, whose URL is dead by design after every restart, so it hits this bug on every restored session. Since 0.0.16 it closes its own stale tabs at activation, which keeps later sessions clean because a closed tab is never restored; it cannot heal the one session that arrives poisoned, because no in-window action short of `Developer: Reload Window` repairs the menus. Users of any extension (or any manual localhost tab) are still exposed with no workaround at all.
+Current bridge posture: since the chromeless panel became the default door, the bridge no longer opens harness UIs in this browser view at all, and the poisoned-restore path is gone for its users; the `embedded` door keeps the view available, and for those users the stale-tab sweep (0.0.16) still closes dead harness tabs at activation, which keeps later sessions clean because a closed tab is never restored. It cannot heal the one session that arrives poisoned, because no in-window action short of `Developer: Reload Window` repairs the menus. Users of any extension (or any manual localhost tab) are still exposed with no workaround at all.

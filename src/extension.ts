@@ -10,7 +10,9 @@ import * as path from 'node:path'
 import { Bridge } from './bridge/bridge.js'
 import { bridgePaths, ensureBridgeDirs } from './bridge/paths.js'
 import { asLedgerPort, type LedgerPort } from './bridge/api.js'
+import { spawn } from 'node:child_process'
 import { ControlServer } from './bridge/control-server.js'
+import { EmbedProxy } from './bridge/embed-proxy.js'
 import { createCoreCatalogSource } from './bridge/core-catalog.js'
 import { createEditorTools } from './bridge/editor-tools.js'
 import { readBridgeSettings, readMainRegistry, mainExtensionInstalled, MAIN_EXT_ID } from './bridge/settings.js'
@@ -23,17 +25,42 @@ const SHUTDOWN_DRAIN_BUDGET_MS = 5000
 /**
  * Bridge settings the harness reads at boot, so changing one means a restart.
  * Everything else (`drainTimeoutSeconds` is read per stop, `ingestIntervalSeconds`
- * just re-arms a timer, `autoStart` gates starting) must never cut a live turn.
+ * just re-arms a timer) must never cut a live turn.
  */
 const BRIDGE_RESTART_KEYS = ['defaultModelId', 'titleModel', 'titleMaxTokens', 'compactionModel', 'compactionMaxTokens', 'dshVersion'] as const
 
 let output: vscode.LogOutputChannel | undefined
 
-function log(): { info(m: string): void; warn(m: string): void; error(m: string): void } {
-  output ??= vscode.window.createOutputChannel('DeepSeek Harness Bridge', { log: true })
+function log(): vscode.LogOutputChannel {
+  if (!output) {
+    output = vscode.window.createOutputChannel('DeepSeek Harness Bridge', { log: true })
+    applyLogLevel()
+  }
   return output
 }
 
+/**
+ * The developer’s lens, one built-in switch from complete. The Debug-tier
+ * emissions (harness stdout/stderr mirrors in the supervisor, MCP method and
+ * tool-call names in the control server) are ALWAYS emitted and the channel’s
+ * own level gates them — VS Code exposes no programmatic setter (
+ * `LogOutputChannel.logLevel` is read-only as of 1.140) and the per-channel
+ * picker persists the choice. This setting records the intent, reveals the
+ * channel, and names the picker once, so the only unobvious step in turning
+ * the verbosity up disappears.
+ */
+function applyLogLevel(): void {
+  if (!output) return
+  const setting = vscode.workspace.getConfiguration('dsh-bridge').get<string>('logLevel', 'info')
+  if ((setting === 'debug' || setting === 'trace') && output.logLevel > vscode.LogLevel.Debug) {
+    output.show(false)
+    output.info(
+      `dsh-bridge.logLevel is "${setting}", but this channel currently hides Debug lines. ` +
+        'Use the gear control ("Set Log Level…") at the top of this Output channel and pick Debug ' +
+        '(the choice persists); harness stdout/stderr mirrors and MCP tool-call lines appear immediately.',
+    )
+  }
+}
 /**
  * The ledger port, re-resolved per pass: the main extension may activate after
  * us, or be updated/reloaded, and a port captured once at activation would keep
@@ -50,44 +77,289 @@ function resolveLedgerPort(): LedgerPort | undefined {
   }
 }
 
-/**
- * Show the harness UI per `dsh-bridge.openIn`. `embedded` (default) uses the
- * editor's own browser view: VS Code 1.140 removed the Simple Browser
- * extension (its `simpleBrowser.show` is gone from the command registry,
- * certified on the extension-host rail) and shipped a built-in Browser area,
- * so the probe tries the new door first and keeps the old one for older
- * builds and VSCodium. `external`, or either embedded door missing, ends in
- * the system browser, said out loud. A chromeless webview panel was built
- * and retired the same day (0.0.10/0.0.11): the harness authenticates its
- * browser session with a `SameSite=Strict` HttpOnly cookie, and Chromium
- * never sends Strict cookies from a cross-site frame, so the iframe only
- * ever reached the server's 401 text. The Browser area shows the page
- * top-level, where the cookie works. Do not re-propose the iframe.
- * The token-bearing URL only ever crosses as a command argument.
- */
-async function openHarnessUrl(url: string): Promise<void> {
-  const mode = vscode.workspace.getConfiguration('dsh-bridge').get<string>('openIn', 'embedded')
-  if (mode === 'embedded') {
-    const commands = await vscode.commands.getCommands(true)
-    const door = commands.includes('workbench.action.browser.open')
-      ? 'workbench.action.browser.open'
-      : commands.includes('simpleBrowser.show')
-        ? 'simpleBrowser.show'
-        : undefined
-    if (door) {
-      try {
-        await vscode.commands.executeCommand(door, url)
-        return
-      } catch {
-        void vscode.window.showInformationMessage(
-          'The embedded browser view refused to open, so the harness opens in the system browser instead.',
-        )
+let embed: EmbedProxy | undefined
+let embedStart: Promise<string> | undefined
+const harnessPanels = new Set<vscode.WebviewPanel>()
+let panelProxyUrl: string | undefined
+let panelHarnessUrl: string | undefined
+/** The live harness URL as last seen, so a revived tab reconnects even when the serializer races the first render. */
+let knownHarnessUrl: string | undefined
+
+/** The embed proxy is lazy: only a panel or app-window open needs its door. */
+function ensureEmbed(): Promise<string> {
+  embed ??= new EmbedProxy({
+    port: vscode.workspace.getConfiguration('dsh-bridge').get<number>('embedPort', 43171),
+    log: log(),
+    onTitle: (view, title) => {
+      for (const panel of harnessPanels) {
+        if (panelViewIds.get(panel) === view) {
+          setPanelTitle(panel, title, view)
+          return
+        }
       }
-    } else {
+      log().debug?.(`embed title beacon for an unknown view (${view})`) 
+    },
+  })
+  embedStart ??= embed.listen().catch((err: Error) => {
+    embedStart = undefined
+    throw err
+  })
+  return embedStart
+}
+
+/** Aim the proxy at a harness URL and hand back its stable root (undefined on failure). */
+async function embedRootFor(url: string): Promise<string | undefined> {
+  try {
+    const root = await ensureEmbed()
+    embed?.setTarget(url)
+    return root
+  } catch (err) {
+    log().warn(`embed proxy did not start: ${(err as Error).message}`)
+    return undefined
+  }
+}
+
+/**
+ * The panel shell. The CSP admits exactly one frame source — the proxy —
+ * and the src carries no secret: the proxy holds the harness session, so
+ * nothing token-bearing ever enters the browser or its history.
+ */
+/**
+ * Chords the frame may hand to the workbench, and only these. The frame
+ * forwards a modifier chord only when its own handlers did not call
+ * preventDefault, so DSH keeps every shortcut it actually implements —
+ * this list is only what the harness leaves on the table. VS Code 1.145
+ * dropped the webview keyboard protocol, so the extension executing the
+ * command directly is the road that exists.
+ */
+const KEYBOARD_BRIDGE: Record<string, string> = {
+  F1: 'workbench.action.showCommands',
+  'Ctrl+Shift+P': 'workbench.action.showCommands',
+  'Cmd+Shift+P': 'workbench.action.showCommands',
+  'Ctrl+P': 'workbench.action.quickOpen',
+  'Cmd+P': 'workbench.action.quickOpen',
+  'Ctrl+B': 'workbench.action.toggleSidebarVisibility',
+  'Cmd+B': 'workbench.action.toggleSidebarVisibility',
+  'Ctrl+Shift+E': 'workbench.view.explorer',
+  'Cmd+Shift+E': 'workbench.view.explorer',
+  'Ctrl+Shift+F': 'workbench.view.search',
+  'Cmd+Shift+F': 'workbench.view.search',
+  'Ctrl+Comma': 'workbench.action.openSettings',
+  'Cmd+Comma': 'workbench.action.openSettings',
+  'Ctrl+W': 'workbench.action.closeActiveEditor',
+  'Cmd+W': 'workbench.action.closeActiveEditor',
+}
+
+async function runBridgeKey(chord: string): Promise<void> {
+  if (!vscode.workspace.getConfiguration('dsh-bridge').get<boolean>('keyboardBridge', true)) return
+  const cmd = KEYBOARD_BRIDGE[chord]
+  if (!cmd) return
+  log().debug?.(`keyboard bridge: ${chord} -> ${cmd}`)
+  try {
+    await vscode.commands.executeCommand(cmd)
+  } catch (err) {
+    log().warn(`keyboard bridge: ${cmd} failed: ${(err as Error).message}`)
+  }
+}
+
+function harnessPanelHtml(root: string, view = ''): string {
+  const src = view ? `${root}/?dshView=${view}` : `${root}/`
+  return [
+    '<!doctype html><html><head><meta charset="utf-8">',
+    `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; frame-src ${root}; img-src data: blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'">`,
+    '<style>html,body{margin:0;padding:0;height:100%;overflow:hidden}iframe{border:0;width:100%;height:100%;display:block}</style>',
+    '</head><body><iframe src="' + src + '" allow="clipboard-read; clipboard-write"></iframe>',
+    // The proxy stamps a title beacon into the harness page carrying this
+    // view's id; the beacon reports two ways (parent.postMessage here AND a
+    // same-origin POST to the proxy), because a webview is exactly where you
+    // stop trusting any single messaging route. Either one renames the tab.
+    '<script>',
+    'const api = typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : null',
+    'window.addEventListener("message", (e) => { const d = e.data; if (api && d && (typeof d.dshEmbedTitle === "string" || typeof d.dshKey === "string")) api.postMessage(d) })',
+    '</script></body></html>',
+  ].join('')
+}
+
+/** Which beacon belongs to which panel: a per-load id the shell carries in the iframe src. */
+const panelViewIds = new WeakMap<vscode.WebviewPanel, string>()
+
+function repaintHarnessPanels(root: string): void {
+  for (const panel of harnessPanels) panel.webview.html = harnessPanelHtml(root, panelViewIds.get(panel) ?? '')
+  panelProxyUrl = root
+}
+
+/**
+ * 'Session — DeepSeek Harness' is what the GUI stamps into document.title
+ * (dsh-client-ui-layout). Keep the session, drop the product, prefix ours.
+ */
+function setPanelTitle(panel: vscode.WebviewPanel, raw: string, view: string): void {
+  const t = raw.trim()
+  if (!t) return
+  const session = (t.includes(' \u2014 ') ? t.split(' \u2014 ').slice(0, -1).join(' \u2014 ').trim() : t) || t
+  const next = `DSH \u2014 ${session.slice(0, 80)}`
+  if (panel.title !== next) {
+    panel.title = next
+    log().debug?.(`harness view (${view}) titled: ${next}`)
+  }
+}
+
+function showHarnessPanel(root: string, fresh: boolean): void {
+  if (!fresh) {
+    const first = harnessPanels.values().next().value as vscode.WebviewPanel | undefined
+    if (first) {
+      if (panelProxyUrl !== root) repaintHarnessPanels(root)
+      first.reveal()
+      return
+    }
+  }
+  // The harness session-multiplexes, so a second view is a full GUI on the
+  // same bus: its own tab, its own session selection, splittable and movable
+  // into a window of its own like any editor.
+  const panel = vscode.window.createWebviewPanel(
+    'dshBridge.harness',
+    'DSH Harness',
+    vscode.ViewColumn.Active,
+    { enableScripts: true, retainContextWhenHidden: true },
+  )
+  adoptHarnessPanel(panel, root)
+  panelProxyUrl = root
+}
+
+/**
+ * One adoption path for both doors into the set: fresh creation and VS Code's
+ * revival of a tab a previous window session left behind. Revived tabs arrive
+ * empty; they get the proxy frame when the harness is reachable (or as soon as
+ * render() reports its URL) and an honest waiting card until then.
+ */
+function adoptHarnessPanel(panel: vscode.WebviewPanel, root?: string): void {
+  const view = randomUUID().slice(0, 8)
+  panelViewIds.set(panel, view)
+  panel.iconPath = new vscode.ThemeIcon('rocket')
+  panel.webview.html =
+    root
+      ? harnessPanelHtml(root, view)
+      : '<!doctype html><html><head><meta charset="utf-8"></head><body style="font-family:var(--vscode-font-family, sans-serif);color:var(--vscode-descriptionForeground, #888);padding:2.5rem">Waiting for the harness. Open it via the DSH status item or run \u201cDSH: Start Harness\u201d \u2014 this view reconnects by itself.</body></html>'
+  panel.onDidDispose(() => {
+    harnessPanels.delete(panel)
+    if (harnessPanels.size === 0) panelProxyUrl = undefined
+  })
+  panel.webview.onDidReceiveMessage((message: { dshEmbedTitle?: unknown; dshKey?: unknown }) => {
+    const chord = typeof message?.dshKey === 'string' ? message.dshKey : ''
+    if (chord) {
+      void runBridgeKey(chord)
+      return
+    }
+    const raw = typeof message?.dshEmbedTitle === 'string' ? message.dshEmbedTitle : ''
+    log().debug?.(`harness view (${view}) postMessage: ${raw}`)
+    if (raw) setPanelTitle(panel, raw, view)
+  })
+  harnessPanels.add(panel)
+  if (!root && knownHarnessUrl) {
+    void embedRootFor(knownHarnessUrl).then((r) => {
+      if (r && harnessPanels.has(panel)) panel.webview.html = harnessPanelHtml(r, view)
+    })
+  }
+}
+/**
+ * Keep an open panel glued to the live harness. Every state transition
+ * routes here; the URL guard makes it free when nothing changed. A harness
+ * restart re-logs the proxy through the new token URL and reloads the frame
+ * in place — the panel's own URL never moves.
+ */
+function syncHarnessPanel(url: string | undefined): void {
+  knownHarnessUrl = url ?? knownHarnessUrl
+  if (harnessPanels.size === 0 || !url || url === panelHarnessUrl) return
+  panelHarnessUrl = url
+  void embedRootFor(url).then((root) => {
+    if (root) repaintHarnessPanels(root)
+  })
+}
+
+/**
+ * Chromium `--app` window: a bar-less standalone window sharing the browser
+ * profile, aimed at the stable proxy root. Windows-only door; elsewhere it
+ * reports the miss and the caller falls back.
+ */
+function openAppWindow(url: string): boolean {
+  if (process.platform !== 'win32') return false
+  const candidates = [
+    process.env['PROGRAMFILES(X86)'] + '\\Microsoft\\Edge\\Application\\msedge.exe',
+    process.env['PROGRAMFILES'] + '\\Microsoft\\Edge\\Application\\msedge.exe',
+    process.env['PROGRAMFILES'] + '\\Google\\Chrome\\Application\\chrome.exe',
+    process.env['PROGRAMFILES(X86)'] + '\\Google\\Chrome\\Application\\chrome.exe',
+    process.env['LOCALAPPDATA'] + '\\Google\\Chrome\\Application\\chrome.exe',
+  ]
+  const exe = candidates.find((c) => c && existsSync(c))
+  if (!exe) return false
+  try {
+    const child = spawn(exe, [`--app=${url}`], { detached: true, stdio: 'ignore' })
+    child.unref()
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Show the harness UI per `dsh-bridge.openIn`.
+ *
+ * `panel` (the default) docks a chromeless webview fed by the embed proxy.
+ * The naive iframe this replaces died of `SameSite=Strict` cookies in
+ * 0.0.10/0.0.11 — Chromium will not carry the harness session across the
+ * webview origin, and that remains true; the proxy simply moves the
+ * session server-side (see `bridge/embed-proxy.ts`). Never aim the panel
+ * at the raw harness URL. `appWindow` opens the same stable proxy root in
+ * a bar-less Chromium `--app` window. `embedded` keeps the built-in browser
+ * view, toolbar and all (VS Code exposes no way to hide it; 1.140 removed
+ * Simple Browser, so the probe also answers `simpleBrowser.show` for
+ * older builds and VSCodium). `external`, or any door missing, ends in the
+ * system browser, said out loud. The token-bearing URL only ever crosses
+ * as a function argument; the panel and app window see the proxy root.
+ */
+async function openHarnessUrl(url: string, fresh = false): Promise<void> {
+  const mode = vscode.workspace.getConfiguration('dsh-bridge').get<string>('openIn', 'panel')
+  if (mode === 'panel' || mode === 'appWindow') {
+    const root = await embedRootFor(url)
+    if (root) {
+      panelHarnessUrl = url
+      knownHarnessUrl = url
+      if (mode === 'panel') {
+        showHarnessPanel(root, fresh)
+        return
+      }
+      if (openAppWindow(root)) return
       void vscode.window.showInformationMessage(
-        'This editor build provides no embedded browser view, so the harness opens in the system browser instead.',
+        'No Edge or Chrome install was found for the app-window door, so the harness opens in the built-in browser view.',
+      )
+    } else if (mode === 'panel') {
+      void vscode.window.showInformationMessage(
+        'The embed proxy could not start, so the harness opens in the built-in browser view.',
       )
     }
+  }
+  if (mode === 'external') {
+    await vscode.env.openExternal(vscode.Uri.parse(url))
+    return
+  }
+  const commands = await vscode.commands.getCommands(true)
+  const door = commands.includes('workbench.action.browser.open')
+    ? 'workbench.action.browser.open'
+    : commands.includes('simpleBrowser.show')
+      ? 'simpleBrowser.show'
+      : undefined
+  if (door) {
+    try {
+      await vscode.commands.executeCommand(door, url)
+      return
+    } catch {
+      void vscode.window.showInformationMessage(
+        'The embedded browser view refused to open, so the harness opens in the system browser instead.',
+      )
+    }
+  } else {
+    void vscode.window.showInformationMessage(
+      'This editor build provides no embedded browser view, so the harness opens in the system browser instead.',
+    )
   }
   await vscode.env.openExternal(vscode.Uri.parse(url))
 }
@@ -187,6 +459,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return url ? { url, token: controlToken } : undefined
     },
     coreCatalog: catalogSource,
+    progress: (message, increment) => {
+      // Null unless a start is in flight: the same Bridge instance also
+      // prepares behind restarts, and an unrequested notification card on a
+      // config-triggered restart would be noise. The start owns the card.
+      startProgress?.(message, increment)
+    },
     onUnexpectedExit: (info) => {
       render()
       // The URL died with the server; a tab nobody can serve is tomorrow's
@@ -228,9 +506,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Declared before render(): the pill reads this promise to show the
   // starting state, and render() runs at activation, before any start.
   let starting: Promise<string | undefined> | undefined
+  // The active start's progress card, if any: bridge phases land here while
+  // guardedStart holds the notification open.
+  let startProgress: ((message: string, increment?: number) => void) | undefined
 
   function render(): void {
     const active = bridge.activeRequests()
+    // A panel (or app window) outliving a harness restart is the norm:
+    // re-aim the proxy and reload it in place whenever the URL moved.
+    syncHarnessPanel(bridge.supervisor.url)
     // The palette reflects reality. Start hides itself while the harness runs,
     // and nothing offers "Open" before there is a URL to open.
     void vscode.commands.executeCommand('setContext', 'dshBridge.running', bridge.supervisor.running)
@@ -397,8 +681,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // runs; its agent simply never sees the editor tools (the MCP client
     // cannot dial a dead endpoint and mounts nothing).
     await ensureControl().catch((err: Error) => logger.warn(`editor control channel did not start: ${err.message}`))
-    starting ??= bridge
-      .start()
+    // A cold start installs an npm runtime and a pnpm profile: minutes. The
+    // bridge narrates each phase into this standard progress card so waiting
+    // looks like working. Not cancellable: a start aborted mid-install buys
+    // nothing a crashed one does not already handle (stamps make every
+    // interrupted step reinstall cleanly). withProgress hands back a Thenable
+    // rather than a Promise, so it gets boxed before anything chains on it.
+    starting ??= Promise.resolve(
+      vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'DeepSeek Harness', cancellable: false },
+        async (progress) => {
+          startProgress = (message, increment) =>
+            progress.report(increment === undefined ? { message } : { message, increment })
+          try {
+            return await bridge.start()
+          } finally {
+            startProgress = undefined
+          }
+        },
+      ),
+    )
       .catch((err: Error) => {
         logger.error(`harness failed to start: ${err.message}`)
         void vscode.window.showErrorMessage(`DeepSeek Harness failed to start: ${err.message}`, 'Show Log').then((choice) => {
@@ -480,14 +782,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         scheduleRestart('the vLLM-Copilot registry changed')
       }
       if (!event.affectsConfiguration('dsh-bridge')) return
+      // The verbosity knob is a channel property, not a boot input: flipping it
+      // while a session runs is exactly the moment it earns its keep.
+      if (event.affectsConfiguration('dsh-bridge.logLevel')) applyLogLevel()
       // Only boot-time settings justify draining and restarting a live
       // session. The ingest cadence re-arms here so the setting takes effect
-      // without a restart, and switching autoStart on may start a stopped
-      // harness; none of these may cut an in-flight turn.
+      // without a restart; none of these may cut an in-flight turn.
       if (event.affectsConfiguration('dsh-bridge.ingestIntervalSeconds')) armIngestTimer()
-      if (event.affectsConfiguration('dsh-bridge.autoStart') && readBridgeSettings().autoStart && !bridge.supervisor.running && !starting) {
-        void guardedStart()
-      }
       if (BRIDGE_RESTART_KEYS.some((key) => event.affectsConfiguration(`dsh-bridge.${key}`))) {
         scheduleRestart('a bridge setting changed')
       }
@@ -552,6 +853,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (ingestTimer) clearInterval(ingestTimer)
       if (pendingRestart) clearTimeout(pendingRestart)
       control?.close()
+      embed?.close()
     },
   })
 
@@ -605,6 +907,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       // and never printed to a log or a notification a user might paste.
       await openHarnessUrl(url)
     }),
+    vscode.commands.registerCommand('dshBridge.openNewView', async () => {
+      const url = bridge.supervisor.url ?? (await guardedStart())
+      if (!url) return
+      await openHarnessUrl(url, true)
+    }),
+    // Revive harness views the previous window session had open: tabs survive
+    // reloads now; the session shown inside cannot, because no URL says which
+    // one it was (upstream issues entry 3).
+    vscode.window.registerWebviewPanelSerializer('dshBridge.harness', {
+      deserializeWebviewPanel: async (panel) => adoptHarnessPanel(panel),
+    }),
     vscode.commands.registerCommand('dshBridge.showLogs', async () => {
       output?.show()
     }),
@@ -656,7 +969,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return
   }
 
-  if (readBridgeSettings().autoStart) await guardedStart()
+  // Starting is manual by design: the pill, the command palette, or the
+  // buttons in the notices above. A harness the user did not ask for never
+  // installs a runtime, opens a port, or spends tokens on its own.
   render()
 
   context.subscriptions.push({

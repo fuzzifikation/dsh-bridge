@@ -27,6 +27,8 @@ import { handleMcpRequest, type McpTool } from './mcp.js'
 export interface ControlServerLog {
   info(message: string): void
   warn(message: string): void
+  /** Optional verbosity tier: one line per JSON-RPC request when present. */
+  debug?(message: string): void
 }
 
 /** Requests are JSON-RPC, but `editor_open_diff` carries whole file contents. */
@@ -144,6 +146,11 @@ export class ControlServer {
     // Only tool calls can take user-visible time (a build in the terminal);
     // metadata traffic never earns a drain marker.
     const toolName = mcpToolCallName(parsed)
+    this.deps.log.debug?.(
+      toolName !== undefined
+        ? `mcp tools/call: ${toolName}`
+        : `mcp ${mcpMethodOf(parsed)}`,
+    )
     // The marker is a drain hint, never a gate: a filesystem that refuses it
     // must not be allowed to kill the request (active-marker writes are
     // best-effort everywhere else for exactly this reason).
@@ -186,6 +193,16 @@ export class ControlServer {
 }
 
 /** The tool name when this message is an executing `tools/call`, else undefined. */
+/** Best-effort JSON-RPC method name for debug visibility (batches fold to one label). */
+function mcpMethodOf(parsed: unknown): string {
+  if (Array.isArray(parsed)) return `batch(${parsed.length})`
+  if (parsed && typeof parsed === 'object' && 'method' in parsed) {
+    const m = (parsed as { method: unknown }).method
+    if (typeof m === 'string') return m
+  }
+  return 'request'
+}
+
 function mcpToolCallName(parsed: unknown): string | undefined {
   if (typeof parsed !== 'object' || parsed === null) return undefined
   const v = parsed as Record<string, unknown>

@@ -58,7 +58,6 @@ export interface AuxChoice {
 }
 
 export interface BridgeSettings {
-  autoStart: boolean
   dshVersion: string
   defaultModelId: string
   title: AuxChoice
@@ -93,7 +92,6 @@ function auxChoice(modelId: unknown, maxTokens: unknown): AuxChoice {
 
 export function readBridgeSettings(cfg = vscode.workspace.getConfiguration('dsh-bridge')): BridgeSettings {
   return {
-    autoStart: cfg.get<boolean>('autoStart') !== false,
     dshVersion: safeVersionSpec(cfg.get<string>('dshVersion')),
     defaultModelId: cfg.get<string>('defaultModelId')?.trim() ?? '',
     title: auxChoice(cfg.get('titleModel'), cfg.get('titleMaxTokens')),

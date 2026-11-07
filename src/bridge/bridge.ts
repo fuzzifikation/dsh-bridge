@@ -89,6 +89,15 @@ export interface BridgeDeps {
    */
   controlEndpoint?: () => { url: string; token: string } | undefined
   /**
+   * Live narration of the slow prepare phases (first-start npm installs, the
+   * profile plugin add, the harness boot). A cold start runs for minutes, and
+   * a spinner that says nothing reads like a hang: the editor renders this
+   * into a progress notification so the user watches real steps, not a guess.
+   * Increments weight by measured duration, so the bar tracks elapsed time on
+   * a cold start and races ahead on a warm one, which is the honest picture.
+   */
+  progress?(message: string, increment?: number): void
+  /**
    * The staged core's catalog resolver (`resolveServedModels`, plus
    * `buildDisplayKeys` when present) as a shared, invalidatable source, loaded
    * lazily per prepare and reset whenever staging restages the core, so a
@@ -263,7 +272,9 @@ export class Bridge {
   async prepare(): Promise<PreparedBridge> {
     await this.retireLegacyHomes()
     ensureBridgeDirs(this.deps.paths)
+    this.deps.progress?.('installing the harness runtime (first start only, about 1-2 minutes)')
     const runtime = await this.runtime()
+    this.deps.progress?.('staging the vLLM-Copilot core for the harness', 45)
     const { coreVersion, recompileNeeded } = await this.stage()
     // The trees under the profile changed, so any module the catalog source
     // cached from the previous build is stale. Node caches dynamic imports by
@@ -271,7 +282,9 @@ export class Bridge {
     // trusting the extension host to restart.
     if (recompileNeeded) this.deps.coreCatalog?.invalidate()
 
+    this.deps.progress?.('creating the dsh profile (first start only, about a minute)', 2)
     await ensureProfile({ binPath: runtime.binPath, dshHome: this.deps.paths.root, profile: 'vllmc', manifestFile: path.join(this.deps.paths.profile, 'package.json') })
+    this.deps.progress?.('installing the model adapter into the dsh profile', 18)
     await ensureAdapterInstalled({
       binPath: runtime.binPath,
       dshHome: this.deps.paths.root,
@@ -282,6 +295,7 @@ export class Bridge {
       stampFile: this.deps.paths.adapterStamp,
     })
 
+    this.deps.progress?.('asking your servers which models they serve', 15)
     const registry = this.deps.registry()
     const { served, displayKeys } = await this.resolveCatalog(registry)
     const payload = buildSnapshot({
@@ -295,7 +309,9 @@ export class Bridge {
     const written = writeSnapshot({ snapshotFile: this.deps.paths.snapshot, payload, plugin })
     if (written.written) this.deps.log.info(`snapshot rewritten (v${written.version}, ${payload.config.models.length} model(s))`)
 
+    this.deps.progress?.('composing the harness configuration', 3)
     const overlay = await this.buildOverlay(runtime)
+    this.deps.progress?.('configuration ready', 4)
     this.prepared = {
       dshVersion: runtime.version,
       coreVersion,
@@ -429,6 +445,7 @@ export class Bridge {
         // the predating harness (its replacement was already decided when the
         // composition check refused to adopt it) and retry once.
         this.deps.log.info('prepare could not restage under the running harness; draining it and retrying')
+        this.deps.progress?.('the previous harness is being drained so the update can restage (in-flight turns get their grace)')
         this.supervisor.adopt(predating)
         const drainedNow = await this.supervisor.stop({ drainMs: this.deps.choices().drainTimeoutMs })
         if (!drainedNow.drained) this.deps.log.warn(`${drainedNow.remaining} in-flight request(s) were cut restaging under the harness`)
@@ -436,6 +453,7 @@ export class Bridge {
       }
       if (predating && (await probeHarness(predating.url))) {
         this.deps.log.info('restarting the running harness: its composition predates this bridge build')
+        this.deps.progress?.('replacing the harness from before this build (in-flight turns get their grace)')
         this.supervisor.adopt(predating)
         const result = await this.supervisor.stop({ drainMs: this.deps.choices().drainTimeoutMs })
         if (!result.drained) this.deps.log.warn(`${result.remaining} in-flight request(s) were cut replacing the outdated harness`)
@@ -449,6 +467,7 @@ export class Bridge {
       // race its in-memory copy.
       const folder = this.deps.editorWorkspaceFolder?.()
       if (folder) registerDefaultWorkspace(this.deps.paths.root, folder, this.deps.log)
+      this.deps.progress?.('starting the harness and waiting for its address', 3)
       return await this.supervisor.start()
     } finally {
       if (held.kind === 'acquired') held.lock.release()

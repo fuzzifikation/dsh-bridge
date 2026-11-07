@@ -80,6 +80,10 @@ One agent turn with a tool call through the packaged core against a real server 
 
 Fresh VSCodium install from Open VSX: main + companion activate clean, registry and dashboard work, one complete dsh agent turn with no Copilot present. Publication duty: every release of both extensions publishes to Open VSX too.
 
+**Manual start (2026-11-07, unreleased):** the harness never launches itself. `dsh-bridge.autoStart` is removed; activation only renders the pill, and starting happens through the `dshBridge.start` command: the stopped pill, the command palette, or the Start Harness button in the no-registry notice. Verified with 96 vitest cases and the extension-host e2e. Same day: `.vscodeignore` learned about `.tools/`, `.dsh-acl-recovery/`, `spike/`, and `vitest.config.js`, which had crept into the packaged VSIX (103 files / 3.9 MB down to 39 files / 93 KB). First dogfood VSIX installed on the owner machine, cold DSH_HOME.
+
+**Startup progress (2026-11-07, unreleased):** a cold start runs about two and a half minutes (runtime npm install, profile plugin install, harness boot), and a silent spinner reads as a hang. `BridgeDeps` gained an optional `progress(message, increment)` hook, called at every prepare and boot phase with wording a human can act on ("installing the harness runtime (first start only, about 1-2 minutes)"), and a manual start renders it into a standard `window.withProgress` notification. Increments are weighted by measured cold durations, so the bar tracks elapsed time on a cold start and honestly races ahead on a warm one. Restart paths keep no card: only a start the user asked for owns the notification.
+
 ## Rails
 
 - dsh semver is decorative: certify against a pinned version, regenerate overlays only through `--dump-config`-checked templates, fail loudly on unknown rows. Re-run the Step 1 boot check on every dsh version bump before adopting it.

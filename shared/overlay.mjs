@@ -80,8 +80,16 @@ export const WELCOME_NOTICE_ACK_VERSION = '2026-09-28.1'
  * `dsh-plugin-manager/tools` under `preset-standard`. Restating the row
  * replaces its WHOLE config, so the emit carries the dumped config verbatim
  * and splices one child entry in right after `plugins:`.
+ *
+ * Every tool-bearing preset is listed, not just `standard`: the Web GUI
+ * defaults its sessions to the `ptc` preset (live incident 2026-11-07: a GUI
+ * session on `preset-ptc` saw zero editor tools while the overlay logged a
+ * successful mount on its one preset). `preset-cordis` authors presets and
+ * must be able to test the editor surface it composes. `preset-minimal` is
+ * deliberately read-only-by-design and stays unmounted. Absent rows skip
+ * gracefully, so a composition without the web-app presets is unaffected.
  */
-export const TOOL_PRESET_ROWS = ['preset-standard']
+export const TOOL_PRESET_ROWS = ['preset-standard', 'preset-ptc', 'preset-cordis']
 
 /** The preset child id spliced into each row above. Doubles as the dedupe needle. */
 export const MCP_PRESET_CHILD_ID = 'vllmc-editor-mcp'

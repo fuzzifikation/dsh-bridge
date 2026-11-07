@@ -4,14 +4,18 @@
 # carries the Marketplace icon (docs/* + re-include: a whole excluded folder
 # can never be re-entered, its children can).
 .vscode-test/
+.tools/
 .vllm/
+.dsh-acl-recovery/
 out-e2e/
 temp/
 node_modules/
+spike/
 src/
 test/
 scripts/
 tsconfig.json
+vitest.config.js
 package-lock.json
 docs/*
 !docs/images/

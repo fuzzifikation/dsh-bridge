@@ -19,6 +19,8 @@ import { drainActiveRequests } from './ingest.js'
 export interface SupervisorLog {
   info(message: string): void
   warn(message: string): void
+  /** Optional verbosity tier: every harness line is mirrored here when present. */
+  debug?(message: string): void
 }
 
 export interface PidRecord {
@@ -407,6 +409,12 @@ export class Supervisor {
     const urlFound = new Promise<string>((resolve, reject) => {
       const settle = (line: string, source: 'stdout' | 'stderr'): void => {
         this.tail = `${this.tail}${line}\n`.slice(-8000)
+        // Mirror EVERY line at debug: launcher boot chatter, plugin activation
+        // notes, and HMR events are the only window into a harness that is
+        // alive but misbehaving, and they used to vanish unless the line
+        // literally said "error". Gating is the channel level's job, not ours.
+        const mirror = line.trim()
+        if (mirror) o.log.debug?.(`[harness ${source}] ${mirror}`)
         const match = URL_LINE.exec(line)
         if (match?.[1]) {
           this.url = match[1]

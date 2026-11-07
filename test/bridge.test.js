@@ -23,6 +23,8 @@ import { ensureDshRuntime, isSafeVersionSpec } from '../out/bridge/runtime.js'
 import { ensureAdapterInstalled } from '../out/bridge/dsh-cli.js'
 import { registerDefaultWorkspace } from '../out/bridge/workspace.js'
 import { ControlServer } from '../out/bridge/control-server.js'
+import { EmbedProxy } from '../out/bridge/embed-proxy.js'
+import { connect as netConnect } from 'node:net'
 import { buildOverlay } from '../shared/overlay.mjs'
 import * as plugin from '../plugin/snapshot.js'
 
@@ -689,12 +691,29 @@ describe('overlay: editor tools mount as an MCP preset child', () => {
     "        name: '@deepseek-ai/dsh-tool-fs'",
     '        config:',
     '          readOnly: false',
+    // The web GUI defaults sessions to `ptc` and offers `cordis` for preset
+    // authoring; a mount that only lands on `standard` is invisible to both.
+    '- id: preset-ptc',
+    '  config:',
+    '    plugins:',
+    "      - id: persona",
+    "        name: '@deepseek-ai/dsh-persona'",
+    '- id: preset-cordis',
+    '  config:',
+    '    plugins:',
+    "      - id: persona",
+    "        name: '@deepseek-ai/dsh-persona'",
   ].join('\n')
   const endpoint = { url: 'http://127.0.0.1:5599', token: 'tok-123' }
 
   it('mounts the upstream MCP client as a preset child dialing /mcp when an endpoint exists', () => {
     const { yml } = buildOverlay(dump, { model: 'm-1', mcpEndpoint: endpoint })
     expect(yml).toContain('- id: vllmc-editor-mcp')
+    // Every tool-bearing preset gets its own child: the GUI's default `ptc`
+    // session must see the editor tools exactly like `standard` does.
+    expect(yml).toContain('- id: preset-ptc')
+    expect(yml).toContain('- id: preset-cordis')
+    expect((yml.match(/- id: vllmc-editor-mcp/g) || []).length).toBe(3)
     expect(yml).toContain("name: '@deepseek-ai/dsh-mcp-client'")
     expect(yml).toContain('serverName: vllmc_editor')
     expect(yml).toContain('url: http://127.0.0.1:5599/mcp')
@@ -735,9 +754,19 @@ describe('overlay: editor tools mount as an MCP preset child', () => {
     const once = buildOverlay(dump, { model: 'm-1', mcpEndpoint: endpoint }).yml
     const twice = buildOverlay(once, { model: 'm-1', mcpEndpoint: endpoint }).yml
     // The composed dump already carries the mount, so the overlay restates
-    // nothing: no second preset row, and the child id appears at most once.
-    expect(twice).not.toContain('- id: preset-standard')
-    expect((twice.match(/vllmc-editor-mcp/g) || []).length).toBeLessThanOrEqual(1)
+    // nothing: no preset row at all, and no spliced child anywhere.
+    expect(twice).not.toMatch(/- id: preset-/)
+    expect(twice).not.toContain('vllmc-editor-mcp')
+  })
+
+  it('skips absent preset rows with a warning instead of failing the boot', () => {
+    // A profile without the web-app presets must still compose: only the
+    // present row mounts; the missing rows surface in `skipped`.
+    const stdOnly = dump.slice(0, dump.indexOf('- id: preset-ptc'))
+    const once = buildOverlay(stdOnly, { model: 'm-1', mcpEndpoint: endpoint })
+    expect(once.presetMounts).toEqual(['preset-standard'])
+    expect(once.skipped.some((s) => s.startsWith('preset-ptc'))).toBe(true)
+    expect(once.skipped.some((s) => s.startsWith('preset-cordis'))).toBe(true)
   })
 })
 
@@ -804,6 +833,26 @@ describe('editor control channel (MCP)', () => {
     })
     expect(wrong.status).toBe(401)
     expect(ran).toBe(0)
+  })
+
+  it('debug-logs every JSON-RPC method and names every tool call (the verbosity ladder)', async () => {
+    // Named breakage the ladder prevents: an editor tool "never arriving" is
+    // usually the client never calling (mount/token drift after a reload);
+    // without per-request debug lines the bridge cannot say who stayed silent.
+    const debugs = []
+    server = new ControlServer({
+      token,
+      activeDir: join(dir, 'active'),
+      mcp: { tools: () => tools, serverInfo: { name: 'test-editor', version: '9.9.9' } },
+      log: { info() {}, warn() {}, debug: (m) => debugs.push(m) },
+    })
+    const url = await server.listen()
+    await mcpFetch(url, { jsonrpc: '2.0', method: 'notifications/initialized' })
+    await mcpFetch(url, { jsonrpc: '2.0', id: 1, method: 'tools/list' })
+    await mcpFetch(url, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'editor_state' } })
+    expect(debugs.some((m) => m.includes('notifications/initialized'))).toBe(true)
+    expect(debugs.some((m) => m.includes('tools/list'))).toBe(true)
+    expect(debugs.some((m) => m.includes('tools/call') && m.includes('editor_state'))).toBe(true)
   })
 
   it('answers the handshake the pinned client demands: version echo, tool list, 202 notifications, 405 stream probe', async () => {
@@ -1140,5 +1189,185 @@ describe('composition and legacy home bookkeeping', () => {
     expect(legacyHomeDirs(dir, join(dir, 'dsh-home'))).toEqual([join(dir, 'dsh-home-0.0.1'), join(dir, 'dsh-home-0.0.2')])
     // Rails still run versioned roots: self-exclusion must be by resolve, not name.
     expect(legacyHomeDirs(dir, join(dir, 'dsh-home-0.0.1'))).toEqual([join(dir, 'dsh-home-0.0.2')])
+  })
+})
+
+describe('embed proxy (the chromeless-panel door)', () => {
+  const quiet = { info() {}, warn() {} }
+  // Named breakage this prevents: 0.0.10's webview showed a permanent 401
+  // because Chromium refuses to carry the harness's SameSite=Strict session
+  // across the webview origin. The proxy carries it server-side instead; if
+  // that ever regresses, these tests see a 401 (or a 502 loop) immediately.
+  let harness
+  let proxy
+
+  afterEach(async () => {
+    proxy?.close()
+    proxy = undefined
+    if (harness) await new Promise((r) => harness.close(r))
+    harness = undefined
+  })
+
+  function startHarness(sessionId) {
+    return new Promise((resolve) => {
+      const s = createServer((req, res) => {
+        const cookie = req.headers.cookie || ''
+        if (req.url.startsWith('/enter')) {
+          // The real login: token in, Strict HttpOnly cookie on a 303 — the
+          // exact shape dsh-client-connection stamps.
+          res.writeHead(303, {
+            location: `http://127.0.0.1:${s.address().port}/app`,
+            'set-cookie': `sid=${sessionId}; Path=/; HttpOnly; SameSite=Strict`,
+          })
+          res.end()
+          return
+        }
+        if (req.url === '/') {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+          res.end('<html><body><h1>APP PAGE</h1></body></html>')
+          return
+        }
+        if (req.url === '/app') {
+          if (cookie.includes(`sid=${sessionId}`)) {
+            res.writeHead(200, { 'content-type': 'text/plain' })
+            res.end(`APP:${sessionId}`)
+          } else {
+            res.writeHead(401)
+            res.end('nope')
+          }
+          return
+        }
+        if (req.url === '/go') {
+          res.writeHead(303, { location: `http://127.0.0.1:${s.address().port}/app` })
+          res.end()
+          return
+        }
+        if (req.url === '/echo' && req.method === 'POST') {
+          let body = ''
+          req.on('data', (c) => (body += c))
+          req.on('end', () => {
+            res.writeHead(200, { 'content-type': 'text/plain' })
+            res.end(`cookie=${cookie}|body=${body}`)
+          })
+          return
+        }
+        res.writeHead(404)
+        res.end('404')
+      })
+      s.on('upgrade', (req, socket) => {
+        const cookie = req.headers.cookie || ''
+        if (!cookie.includes(`sid=${sessionId}`)) {
+          socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
+          return
+        }
+        socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: fake\r\n\r\n')
+        socket.write('WSOK')
+        // Like any real ws stack: when the peer ends, the accepted leg ends too,
+        // or the server's own close would wait on a write-only ghost.
+        socket.on('end', () => socket.destroy())
+      })
+      s.listen(0, '127.0.0.1', () => resolve(s))
+    })
+  }
+
+  const enterUrl = (s) => `http://127.0.0.1:${s.address().port}/enter?token=tok1`
+
+  it('rides the Strict session a webview browser could never carry', async () => {
+    harness = await startHarness('A1')
+    proxy = new EmbedProxy({ port: 0, log: quiet })
+    const root = await proxy.listen()
+    proxy.setTarget(enterUrl(harness))
+    const res = await fetch(`${root}/app`)
+    expect(await res.text()).toBe('APP:A1')
+    // The jar stays server-side: a Set-Cookie here would hand the webview a
+    // cookie it could not send back, hiding future breakage behind a half-state.
+    expect(res.headers.get('set-cookie')).toBeNull()
+  })
+
+  it('replaces any arriving cookie header with the jar and passes POST bodies through', async () => {
+    harness = await startHarness('A1')
+    proxy = new EmbedProxy({ port: 0, log: quiet })
+    const root = await proxy.listen()
+    proxy.setTarget(enterUrl(harness))
+    const res = await fetch(`${root}/echo`, {
+      method: 'POST',
+      headers: { cookie: 'junk=1', 'content-type': 'text/plain' },
+      body: 'hi',
+    })
+    expect(await res.text()).toBe('cookie=sid=A1|body=hi')
+  })
+
+  it('keeps the browser on the proxy across absolute redirects', async () => {
+    harness = await startHarness('A1')
+    proxy = new EmbedProxy({ port: 0, log: quiet })
+    const root = await proxy.listen()
+    proxy.setTarget(enterUrl(harness))
+    const res = await fetch(`${root}/go`, { redirect: 'manual' })
+    expect(res.status).toBe(303)
+    expect(res.headers.get('location')).toBe(`${root}/app`)
+  })
+
+  it('relays the WebSocket handshake with the session attached', async () => {
+    harness = await startHarness('A1')
+    proxy = new EmbedProxy({ port: 0, log: quiet })
+    const root = await proxy.listen()
+    proxy.setTarget(enterUrl(harness))
+    // Warm the jar over plain HTTP first, exactly as the page's boot would.
+    expect(await (await fetch(`${root}/app`)).text()).toBe('APP:A1')
+    const u = new URL(root)
+    const sock = netConnect(Number(u.port), '127.0.0.1')
+    const chunks = []
+    sock.on('data', (c) => chunks.push(c))
+    await new Promise((r) => sock.once('connect', r))
+    sock.write('GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n')
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline && !Buffer.concat(chunks).includes('WSOK')) {
+      await new Promise((r) => setTimeout(r, 20))
+    }
+    const got = Buffer.concat(chunks).toString()
+    sock.destroy()
+    expect(got).toContain('101 Switching Protocols')
+    expect(got).toContain('WSOK')
+  })
+
+  it('stamps the title beacon into the index page and nowhere else', async () => {
+    harness = await startHarness('A1')
+    proxy = new EmbedProxy({ port: 0, log: quiet })
+    const root = await proxy.listen()
+    proxy.setTarget(enterUrl(harness))
+    const page = await (await fetch(`${root}/`)).text()
+    expect(page).toContain('APP PAGE')
+    expect(page).toContain('dshEmbedTitle')
+    expect(page).toContain('dshKey')
+    expect(page.indexOf('dshEmbedTitle')).toBeLessThan(page.indexOf('</html>'))
+    // Plain passthrough stays byte-identical: no beacon in non-HTML, and
+    // not even in HTML that is not the index page.
+    const other = await (await fetch(`${root}/app`)).text()
+    expect(other).toBe('APP:A1')
+  })
+
+  it('takes the title beacon over the same-origin channel without auth', async () => {
+    harness = await startHarness('A1')
+    const titles = []
+    proxy = new EmbedProxy({ port: 0, log: quiet, onTitle: (v, t) => titles.push([v, t]) })
+    const root = await proxy.listen()
+    // No setTarget, no login: the endpoint writes one string and reads nothing.
+    const res = await fetch(`${root}/__dsh-title?v=abc&t=${encodeURIComponent('Dsf Query \u2014 DeepSeek Harness')}`)
+    expect(res.status).toBe(204)
+    expect(titles).toEqual([['abc', 'Dsf Query \u2014 DeepSeek Harness']])
+  })
+
+  it('serves 502 while the harness is gone and rides the new one after retarget', async () => {
+    harness = await startHarness('A1')
+    proxy = new EmbedProxy({ port: 0, log: quiet })
+    const root = await proxy.listen()
+    proxy.setTarget(enterUrl(harness))
+    expect(await (await fetch(`${root}/app`)).text()).toBe('APP:A1')
+    await new Promise((r) => harness.close(r))
+    harness = undefined
+    expect((await fetch(`${root}/app`)).status).toBe(502)
+    harness = await startHarness('B2')
+    proxy.setTarget(enterUrl(harness))
+    expect(await (await fetch(`${root}/app`)).text()).toBe('APP:B2')
   })
 })
