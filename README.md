@@ -18,7 +18,7 @@ You install the extension. It installs a pinned `@deepseek-ai/dsh` into a privat
 
 ## Status
 
-Pre-alpha (0.0.x), one developer. The loop works end to end: your registry becomes the harness's model list, models your servers stopped serving are hidden, the harness opens as a tab inside VS Code, the agent can call editor tools (diagnostics, open files and diffs, terminal commands, questions back to you), and harness traffic lands in the vLLM-Copilot usage ledger. Windows is the tested platform; others are untested. The design law for this repo (architecture, owner rulings, verification gates) lives in [docs/dsh-bridge-plan.md](docs/dsh-bridge-plan.md), this repo's own since 2026-10-08.
+Pre-alpha (0.0.x), one developer. The loop works end to end: your registry becomes the harness's model list, models your servers stopped serving are hidden, the harness opens as a chromeless tab inside VS Code — per-chat tab titles, VS Code chords answering from inside the frame — the agent can call editor tools (diagnostics, open files and diffs, terminal commands, questions back to you), and harness traffic lands in the vLLM-Copilot usage ledger. Windows is the tested platform; others are untested. The design law for this repo (architecture, owner rulings, verification gates) lives in [docs/dsh-bridge-plan.md](docs/dsh-bridge-plan.md), this repo's own since 2026-10-08.
 
 ## License
 
