@@ -196,7 +196,7 @@ The harness ships as a chromeless editor surface: a `WebviewPanel` whose entire 
 
 ### The machine, drawn (2026-11-07)
 
-Four OS-level programs, one shared library. Boxes are processes; arrows are the channels that actually fail, each with its own failure mode (spawn dies with the pill saying stopped, files queue while a peer is down, the panel URL survives everything the harness does). The core cylinder is the "called, never copied" ruling drawn literally: one staged `out/core`, imported in three processes that therefore cannot disagree.
+Two local processes, one shared library, plus the external model servers. Boxes are processes or things living inside one; arrows are the channels that actually fail, each with its own failure mode (spawn dies with the pill saying stopped, files queue while a peer is down, the panel URL survives everything the harness does). The core is NOT a program: it is imported code with no port, no server, no lifetime, running inside three module instances (adapter in dsh, bridge and vLLM-Copilot in the one shared extension host, which loads both copies as separate module graphs). "Called, never copied" drawn literally: one staged `out/core`, imported where each decision is made.
 
 ```mermaid
 flowchart LR
@@ -215,7 +215,7 @@ flowchart LR
     MCP["dsh-mcp-client mount"]
     WEB["web server, ephemeral port<br/>token login, session cookie"]
   end
-  CORE[("vLLM-Copilot core<br/>one vendored out/core")]
+  CORE["vLLM-Copilot core: LIBRARY, not a process<br/>(no port, no server; imported code only)<br/>one staged out/core, loaded as 3 module instances"]
   SRV["model servers<br/>vLLM, OpenRouter, LM Studio"]
 
   BR -- "spawn (env: control token), pid record, start.lock" --> DSHP
