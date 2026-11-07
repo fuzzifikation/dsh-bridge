@@ -38,6 +38,21 @@ function blocksToText(blocks, resolveImage) {
 }
 
 /**
+ * The `Error: ` marker a tool-failure message carries so the model reads the
+ * turn as a failure. Works on both projections of blocksToContent: the plain
+ * string, and the parts array an image-bearing result produces (where the
+ * naive string check used to drop the marker exactly when the failure showed
+ * a screenshot).
+ */
+function withErrorPrefix(content) {
+  if (typeof content === 'string') return `Error: ${content}`
+  if (!Array.isArray(content)) return content
+  const index = content.findIndex((part) => part?.type === 'text')
+  if (index === -1) return [{ type: 'text', text: 'Error: the tool failed without a text message' }, ...content]
+  return content.map((part, i) => (i === index ? { ...part, text: `Error: ${part.text ?? ''}` } : part))
+}
+
+/**
  * Content projection for image-bearing roles. String content exactly as before
  * when nothing can be forwarded; a parts array only once an image actually
  * resolves, so text-only traffic stays byte-identical to the pre-vision wire.
@@ -131,7 +146,7 @@ export function toWireMessages(options, resolveImage) {
         out.push({
           role: 'tool',
           tool_call_id: message.toolCallId,
-          content: message.isError && typeof text === 'string' ? `Error: ${text}` : text,
+          content: message.isError ? withErrorPrefix(text) : text,
         })
         break
       }

@@ -176,7 +176,7 @@
     "test": "tsc -p tsconfig.json && vitest run"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm": "^0.2.2-rc.1",
     "@types/mocha": "^10.0.10",
     "@types/node": "^26.6.4",
     "@types/vscode": "^1.140.0",

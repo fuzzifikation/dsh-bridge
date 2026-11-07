@@ -71,8 +71,12 @@ export function createCoreCatalogSource(opts: { entryFile: () => string; log: Co
           }
         }
       } catch (err) {
+        // A failed import is not evidence about future imports: the tree may
+        // be mid-restage right now, and caching the failure would serve
+        // "no resolver" (every model unfiltered) until the next stamp bump.
+        // Leave the cache empty so the next prepare retries.
         opts.log.warn(`could not load the staged core for the served-model resolver: ${(err as Error).message}`)
-        cached = null
+        return undefined
       }
       return cached ?? undefined
     },

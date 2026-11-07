@@ -12,9 +12,9 @@
  * The package itself is untouched upstream: this is the published artifact,
  * never a patched copy.
  */
-import { exec, execFileSync } from 'node:child_process'
+import { exec } from 'node:child_process'
 import { promisify } from 'node:util'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
 export interface RuntimeLog {
@@ -39,8 +39,14 @@ export function isSafeVersionSpec(spec: string): boolean {
   return SAFE_VERSION_SPEC.test(spec)
 }
 
-/** Characters an npm argument may legitimately contain, nothing else. */
-const SAFE_NPM_ARG = /^[A-Za-z0-9@._/\-+~^>=]+$/
+/**
+ * Characters an npm argument may legitimately contain, nothing else. Shell
+ * metacharacters are absent on purpose: this string is concatenated, not
+ * escaped, and `>` redirects into a file while cmd's `^` escapes the next
+ * character. Range specifiers never reach here; the version is validated
+ * separately as an exact spec.
+ */
+const SAFE_NPM_ARG = /^[A-Za-z0-9@._/\-+]+$/
 
 /**
  * npm is a `.cmd` on Windows and Node refuses to spawn `.cmd` without a shell,
@@ -129,31 +135,10 @@ export async function ensureDshRuntime(opts: { runtimeDir: string; version: stri
   }
   const found = installedVersion()
   if (!found) throw new Error(`dsh install reported success but ${marker} is not present`)
-  writeFileSync(stamp, `${found}\n`)
+  // tmp + rename: existence of the stamp is the promise that the install
+  // completed, and a crash mid-write must not leave a half file making that
+  // promise. The name is already taken by npm's own debris? Force through.
+  writeFileSync(`${stamp}.tmp`, `${found}\n`)
+  renameSync(`${stamp}.tmp`, stamp)
   return { binPath: manifestBin(marker), version: found, dir: runtimeDir }
-}
-
-/** Exact installed version, or undefined when nothing is installed yet. */
-export function installedDshVersion(runtimeDir: string): string | undefined {
-  try {
-    return (
-      JSON.parse(
-        readFileSync(path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8'),
-      ) as { version?: string }
-    ).version
-  } catch {
-    return undefined
-  }
-}
-
-/** Latest published version, for the drift rail. Throws when npm is missing. */
-export function latestDshVersion(): string {
-  const out = execFileSync('npm', ['view', '@deepseek-ai/dsh', 'dist-tags.latest', '--json'], {
-    encoding: 'utf8',
-    shell: true,
-    timeout: 30_000,
-  })
-  const version = JSON.parse(out)
-  if (typeof version !== 'string') throw new Error('npm view returned no latest version')
-  return version
 }

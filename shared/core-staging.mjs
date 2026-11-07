@@ -26,14 +26,26 @@ function walkJs(dir, visit) {
   }
 }
 
-/** Bare (non-relative, non-builtin) package specifiers the tree imports. */
+/**
+ * Bare (non-relative, non-builtin) package specifiers the tree imports.
+ * Over-inclusion is safe (an unmanifested name fails the build loudly below);
+ * under-inclusion is the killer: a missing dependency resolves only until the
+ * harness imports it, so double quotes and side-effect imports must match too.
+ */
+const BARE_IMPORT = /(?:\bfrom\s*|\bimport\s*\(\s*|^\s*import\s+)['"]([^'".][^'"]*)['"]/
+
 export function scanBareImports(coreDir) {
   const names = new Set()
   walkJs(coreDir, (file) => {
     for (const line of readFileSync(file, 'utf8').split('\n')) {
-      const m = line.match(/from\s+'([^'./][^']*)'|import\(\s*'([^'./][^']*)'/)
+      // Doc comments quote example text ("a value from "data: <json>"") and
+      // compiled JS keeps them; a prose line is not an import no matter what
+      // it quotes. Real imports never start with a comment marker.
+      const trimmed = line.trimStart()
+      if (trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*')) continue
+      const m = line.match(BARE_IMPORT)
       if (!m) continue
-      const spec = m[1] ?? m[2]
+      const spec = m[1]
       const name = spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0]
       if (!builtinModules.includes(name) && !name.startsWith('node:')) names.add(name)
     }

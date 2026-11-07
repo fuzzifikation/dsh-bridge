@@ -141,6 +141,22 @@ describe('snapshot: bridge writes what the plugin reads', () => {
     expect(warnings.join(' ')).toMatch(/Small Model.*not currently served.*wire-two/)
   })
 
+  it('scrubs server URLs out of verdict reasons before they reach log or disk', () => {
+    // Real leak: the core reports a failed fetch with the full server URL in
+    // the reason, and warnings are written verbatim into the bridge log and
+    // snapshot.json. This is a public repo: private hosts never ride along.
+    const warnings = []
+    buildSnapshot({
+      ...registry,
+      defaultModelId: 'm-2',
+      served: { 'm-2': { state: 'absent', reason: 'fetch http://invisible-host.example:8001/v1/models failed' } },
+      onWarning: (m) => warnings.push(m),
+    })
+    const text = warnings.join(' ')
+    expect(text).toMatch(/not currently served/)
+    expect(text).not.toMatch(/invisible-host|http/)
+  })
+
   it('never prunes on an unknown answer: only demonstrated absence hides a model', () => {
     // A server that is down, slow, or answered empty must NOT empty the
     // catalog: `unknown` and missing verdicts keep every model offered,
@@ -393,19 +409,23 @@ describe('usage outbox: exactly-once handoff to the ledger owner', () => {
     const p = paths()
     writeFileSync(join(p.outbox, 'broken.json'), '{not json')
     drop(p.outbox, 'half', { recordId: 'half' })
+    // A negative counter is poison the core's own floor refuses; the bridge
+    // must catch it HERE, because the ledger counts rejected ids as settled
+    // and a mailed poison record is a deleted poison record.
+    drop(p.outbox, 'negative', record('negative', -1))
     const port = ledger()
     const outcome = await ingestOutbox({ outboxDir: p.outbox, quarantineDir: p.quarantine, port })
-    expect(outcome.malformed).toBe(2)
+    expect(outcome.malformed).toBe(3)
     expect(port.calls).toEqual([]) // nothing half-read reaches the ledger
     expect(readdirSync(p.outbox)).toEqual([])
-    expect(readdirSync(p.quarantine).sort()).toEqual(['broken.json', 'half.json'])
+    expect(readdirSync(p.quarantine).sort()).toEqual(['broken.json', 'half.json', 'negative.json'])
     // Still readable for a human to inspect after the fact.
     expect(readFileSync(join(p.quarantine, 'broken.json'), 'utf8')).toBe('{not json')
   })
 
   it('deletes what the owner refuses outright, once, instead of retrying forever', async () => {
     const p = paths()
-    drop(p.outbox, 'poison', record('poison', -1))
+    drop(p.outbox, 'poison')
     const warnings = []
     const refusing = {
       apiVersion: 1,
@@ -683,7 +703,7 @@ describe('overlay: editor tools mount as an MCP preset child', () => {
     // and the default-model row's untouched key both stay verbatim.
     expect(yml).toContain('readOnly: false')
     expect(yml).toContain('thinkingLevel: high')
-    expect(yml).toContain('provider: vllmc')
+    expect(yml).toContain('provider: "vllmc"')
   })
 
   it('seeds the Preview Notice acknowledgement and carries the row\'s other keys', () => {
@@ -694,6 +714,15 @@ describe('overlay: editor tools mount as an MCP preset child', () => {
     expect(yml).toContain('- id: ui-settings-general')
     expect(yml).toContain('welcomeNoticeVersion: 2026-09-28.1')
     expect(yml).toContain('theme: dark')
+  })
+
+  it('quotes the default model so a display name cannot break or hijack the row', () => {
+    // Real breakage: the model is whatever the user typed as displayName.
+    // Unquoted, "gpt: fast" turns the line into a nested mapping (dsh
+    // rejects the row and the composition dies at boot) and "gpt #1"
+    // truncates at the comment marker, aiming a model that does not exist.
+    const { yml } = buildOverlay(dump, { model: 'gpt: fast #4' })
+    expect(yml).toContain('model: "gpt: fast #4"')
   })
 
   it('emits no mount without an endpoint, so a headless prepare still boots', () => {
@@ -829,7 +858,7 @@ describe('editor control channel (MCP)', () => {
     expect(readdirSync(activeDir)).toHaveLength(0)
   })
 
-  it('turns tool failures into readable content and unknown tools into RPC errors, never transport deaths', async () => {
+  it('turns tool failures AND unknown tools into readable content, never transport deaths', async () => {
     const url = await boot([
       ...tools,
       {
@@ -844,8 +873,11 @@ describe('editor control channel (MCP)', () => {
     const failed = (await (await mcpFetch(url, { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'boom', arguments: {} } })).json()).result
     expect(failed.isError).toBe(true)
     expect(failed.content[0].text).toMatch(/editor exploded/)
-    const ghost = (await (await mcpFetch(url, { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'nope', arguments: {} } })).json()).error
-    expect(ghost.code).toBe(-32601)
+    // An unknown tool must land in the transcript as content the model can
+    // correct against, not as an RPC error whose rendering the client decides.
+    const ghost = (await (await mcpFetch(url, { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'nope', arguments: {} } })).json()).result
+    expect(ghost.isError).toBe(true)
+    expect(ghost.content[0].text).toMatch(/no such tool/)
   })
 
   it('answers garbage with an RPC parse error and unknown paths with 404, keeping ping alive', async () => {
@@ -988,6 +1020,57 @@ describe('startup lock', () => {
     try {
       const won = await acquireStartLock({ lockFile, pidFile, waitMs: 5000, pollMs: 50 })
       expect(won.kind).toBe('adopt')
+    } finally {
+      holder.kill()
+      server.close()
+    }
+  })
+
+  it('catches the blind release: a stolen lock keeps protecting its new holder', async () => {
+    // Real breakage: a prepare slower than staleMs loses the lock to a
+    // stealer; the original holder's release used to unlink whatever was
+    // there, releasing the stealer's live lock to a third window that then
+    // runs npm install over the same runtime tree concurrently.
+    const lockFile = join(dir, 'start.lock')
+    const pidFile = join(dir, 'dsh.pid')
+    const first = await acquireStartLock({ lockFile, pidFile, holderPid: 2147483646 })
+    expect(first.kind).toBe('acquired')
+    const second = await acquireStartLock({ lockFile, pidFile, holderPid: 2147483645, waitMs: 1000, pollMs: 50 })
+    expect(second.kind).toBe('acquired')
+    first.lock.release()
+    expect(existsSync(lockFile)).toBe(true)
+    expect(readFileSync(lockFile, 'utf8').trim()).toBe('2147483645')
+    second.lock.release()
+    expect(existsSync(lockFile)).toBe(false)
+  })
+
+  it('does not adopt a harness the caller refuses for composition staleness', async () => {
+    // Real breakage: a window that queued behind a restart used to adopt the
+    // pre-restart record through the waiting path, borrowing an older build's
+    // plugin and skipping the replacement it waited for. The waiting path must
+    // obey the same law as the direct one: refuse means keep waiting, busy
+    // beats stale.
+    const server = createServer((_req, res) => {
+      res.writeHead(200)
+      res.end('ok')
+    })
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { windowsHide: true, stdio: 'ignore' })
+    const lockFile = join(dir, 'start.lock')
+    writeFileSync(lockFile, `${holder.pid}\n`)
+    const pidFile = join(dir, 'dsh.pid')
+    writePidRecord(pidFile, {
+      pid: holder.pid,
+      startedAt: '',
+      profile: 'vllmc',
+      dshVersion: 'x',
+      url: `http://127.0.0.1:${server.address().port}/`,
+    })
+    try {
+      const refused = await acquireStartLock({ lockFile, pidFile, waitMs: 300, pollMs: 50, isAdoptable: () => false })
+      expect(refused.kind).toBe('busy')
+      const accepted = await acquireStartLock({ lockFile, pidFile, waitMs: 5000, pollMs: 50, isAdoptable: () => true })
+      expect(accepted.kind).toBe('adopt')
     } finally {
       holder.kill()
       server.close()

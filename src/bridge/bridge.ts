@@ -13,7 +13,7 @@
  * No `vscode` import: the editor glue lives in `extension.ts`.
  */
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { ensureDshRuntime, type DshRuntime } from './runtime.js'
 import { ensureAdapterInstalled, ensureProfile, requireDsh } from './dsh-cli.js'
@@ -23,7 +23,7 @@ import type { CoreCatalogSource } from './core-catalog.js'
 import { loadOverlay, loadPluginSnapshotModule, loadStaging, type OverlayModule } from './shared-modules.js'
 import { classifyPidRecord, probeHarness, sweepDetachedHarnesses, Supervisor, type PidRecord } from './supervisor.js'
 import { acquireStartLock } from './start-lock.js'
-import { drainActiveRequests, ingestOutbox, type IngestOutcome } from './ingest.js'
+import { ingestOutbox, type IngestOutcome } from './ingest.js'
 import { registerDefaultWorkspace } from './workspace.js'
 import type { LedgerPort } from './api.js'
 import type { BridgePaths } from './paths.js'
@@ -130,7 +130,6 @@ export function compositionIsCurrent(
 export class Bridge {
   readonly supervisor: Supervisor
   private prepared: PreparedBridge | undefined
-  private overlay: OverlayModule | undefined
   private legacyHomesRetired = false
 
   constructor(private readonly deps: BridgeDeps) {
@@ -202,20 +201,28 @@ export class Bridge {
   }
 
   /**
-   * Cheap change detector for the bundled plugin: name, size, and mtime of
-   * every top-level file. A plugin-only bridge update must restage even when
-   * the staged core stamp still matches, or existing installs keep running the
-   * old plugin out of vendor/ forever.
+   * Content fingerprint of the bundled plugin, recursively. A plugin-only
+   * bridge update must restage even when the staged core stamp still matches,
+   * or existing installs keep running the old plugin out of vendor/ forever.
+   * Content, not mtime: an mtime that survives a reinstall (or a checkout
+   * that restores one) would silently skip the restage, and mtime arithmetic
+   * is not a change detector, it is a rumor.
    */
   private pluginFingerprint(): string {
     const dir = path.join(this.deps.extensionRoot, 'plugin')
     const hash = createHash('sha256')
-    for (const entry of readdirSync(dir).sort()) {
-      const file = path.join(dir, entry)
-      const st = statSync(file)
-      if (!st.isFile()) continue
-      hash.update(entry).update(String(st.size)).update(String(st.mtimeMs))
+    const walk = (current: string, rel: string): void => {
+      for (const entry of readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        const full = path.join(current, entry.name)
+        if (entry.isDirectory()) {
+          walk(full, `${rel}${entry.name}/`)
+          continue
+        }
+        if (!entry.isFile()) continue
+        hash.update(`${rel}${entry.name}\u0000`).update(createHash('sha256').update(readFileSync(full)).digest('hex')).update('\n')
+      }
     }
+    walk(dir, '')
     return hash.digest('hex')
   }
 
@@ -307,7 +314,6 @@ export class Bridge {
    */
   private async buildOverlay(runtime: DshRuntime): Promise<OverlayModule & { disabled: number }> {
     const overlay = await loadOverlay(this.deps.extensionRoot)
-    this.overlay = overlay
     const dump = (await requireDsh({
       binPath: runtime.binPath,
       dshHome: this.deps.paths.root,
@@ -388,6 +394,9 @@ export class Bridge {
       lockFile: this.deps.paths.startLock,
       pidFile: this.deps.paths.pid,
       log: this.deps.log,
+      // The waiting path obeys the same adoption law as the direct path:
+      // never borrow a harness whose composition predates this build.
+      isAdoptable: async () => !(await this.needsRestage()),
     })
     if (held.kind === 'adopt') {
       const url = await this.adopt(held.record)
@@ -405,7 +414,26 @@ export class Bridge {
         const url = await this.adopt(second)
         if (url) return url
       }
-      const prepared = await this.prepare()
+      // A borrow this window made earlier may name a harness that stopped
+      // answering (wedged): liveRecord refuses it, so nothing below drains it,
+      // and the stale adoption would both block setBinPath and pretend the
+      // home is busy. Forget it; the pre-spawn sweep reaps the corpse.
+      if (this.supervisor.adopted) this.supervisor.dropAdoption()
+      let prepared: PreparedBridge
+      try {
+        prepared = await this.prepare()
+      } catch (err) {
+        if (!predating || !(await probeHarness(predating.url))) throw err
+        // Windows denies deleting files a live process is reading: a restage
+        // under a running harness can fail on the runtime tree itself. Drain
+        // the predating harness (its replacement was already decided when the
+        // composition check refused to adopt it) and retry once.
+        this.deps.log.info('prepare could not restage under the running harness; draining it and retrying')
+        this.supervisor.adopt(predating)
+        const drainedNow = await this.supervisor.stop({ drainMs: this.deps.choices().drainTimeoutMs })
+        if (!drainedNow.drained) this.deps.log.warn(`${drainedNow.remaining} in-flight request(s) were cut restaging under the harness`)
+        prepared = await this.prepare()
+      }
       if (predating && (await probeHarness(predating.url))) {
         this.deps.log.info('restarting the running harness: its composition predates this bridge build')
         this.supervisor.adopt(predating)
@@ -490,9 +518,12 @@ export class Bridge {
     return result
   }
 
-  async restart(opts: { force?: boolean } = {}): Promise<string> {
-    await this.stop(opts)
-    return this.start()
+  async restart(opts: { force?: boolean } = {}): Promise<{ url: string; drained: boolean; remaining: number }> {
+    const stop = await this.stop(opts)
+    const url = await this.start()
+    // The caller must be able to say out loud that the restart cut live
+    // requests; swallowing the drain verdict here is how turns vanish silently.
+    return { url, drained: stop.drained, remaining: stop.remaining }
   }
 
   /** Fold completed harness requests into the main extension's ledger. */
@@ -512,14 +543,5 @@ export class Bridge {
     } catch {
       return 0
     }
-  }
-
-  /** Preview the drain decision without stopping anything. */
-  previewDrain(timeoutMs: number): Promise<{ drained: boolean; remaining: number }> {
-    return drainActiveRequests(this.deps.paths.active, timeoutMs)
-  }
-
-  privacyRows(): readonly string[] {
-    return this.overlay?.PRIVACY_ROWS ?? []
   }
 }

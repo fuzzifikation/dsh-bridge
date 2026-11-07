@@ -72,6 +72,9 @@ export class ControlServer {
 
   close(): void {
     this.server?.close()
+    // close() only stops new connections; the harness's keep-alive sockets
+    // stay open and hold the port against the next activation.
+    this.server?.closeAllConnections()
     this.server = undefined
     this.address = undefined
   }
@@ -141,7 +144,17 @@ export class ControlServer {
     // Only tool calls can take user-visible time (a build in the terminal);
     // metadata traffic never earns a drain marker.
     const toolName = mcpToolCallName(parsed)
-    const marker = toolName === undefined ? undefined : this.writeMarker(toolName)
+    // The marker is a drain hint, never a gate: a filesystem that refuses it
+    // must not be allowed to kill the request (active-marker writes are
+    // best-effort everywhere else for exactly this reason).
+    let marker: string | undefined
+    if (toolName !== undefined) {
+      try {
+        marker = this.writeMarker(toolName)
+      } catch (err) {
+        this.deps.log.warn(`active marker could not be written (a restart may under-count this tool call): ${(err as Error).message}`)
+      }
+    }
     try {
       const out = await handleMcpRequest(parsed, {
         tools: this.deps.mcp.tools,
@@ -186,16 +199,24 @@ function readCapped(req: import('node:http').IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let size = 0
+    let oversize = false
     req.on('data', (chunk: Buffer) => {
+      if (oversize) return
       size += chunk.length
       if (size > MAX_BODY_BYTES) {
+        // Do NOT destroy: the caller still owes this client a 413 body, and a
+        // destroyed socket delivers nothing. Drain the rest unbuffered so the
+        // response can flush and the connection close cleanly.
+        oversize = true
+        req.resume()
         reject(new Error(`request body exceeds ${MAX_BODY_BYTES} bytes`))
-        req.destroy()
         return
       }
       chunks.push(chunk)
     })
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+    req.on('end', () => {
+      if (!oversize) resolve(Buffer.concat(chunks).toString('utf8'))
+    })
     req.on('error', reject)
   })
 }

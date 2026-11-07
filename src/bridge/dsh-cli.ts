@@ -15,6 +15,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { resolveHarnessNode } from './supervisor.js'
 
 export interface DshResult {
   code: number
@@ -34,13 +35,20 @@ const MAX_OUTPUT_CHARS = 64 * 1024 * 1024
 export async function runDsh(opts: DshRunOptions): Promise<DshResult> {
   const timeoutMs = opts.timeoutMs ?? 180_000
   return new Promise<DshResult>((resolve, reject) => {
-    const child = spawn(process.execPath, [opts.binPath, ...opts.args], {
+    // Same law as the harness spawn: a REAL node, never the editor's Electron.
+    // dsh's launcher fingerprints V8 and refuses Electron builds, and leaving
+    // ELECTRON_RUN_AS_NODE in the environment of a real node binary is a
+    // suggestion no node should receive.
+    const env = { ...process.env, DSH_HOME: opts.dshHome } as NodeJS.ProcessEnv
+    delete env.ELECTRON_RUN_AS_NODE
+    const child = spawn(resolveHarnessNode(), [opts.binPath, ...opts.args], {
       cwd: opts.dshHome,
-      env: { ...process.env, DSH_HOME: opts.dshHome },
+      env,
       windowsHide: true,
     })
     let stdout = ''
     let stderr = ''
+    let settled = false
     const kill = (): void => {
       try {
         child.kill('SIGKILL')
@@ -48,25 +56,37 @@ export async function runDsh(opts: DshRunOptions): Promise<DshResult> {
         /* already dead */
       }
     }
-    const timer = setTimeout(() => {
+    // Rejecting without killing leaves a child writing into pipes nobody
+    // reads: a chatty dsh keeps running forever behind a failed prepare.
+    const failRun = (message: string): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
       kill()
-      reject(new Error(`dsh ${opts.args.join(' ')} did not finish within ${timeoutMs} ms and was killed`))
+      reject(new Error(message))
+    }
+    const timer = setTimeout(() => {
+      failRun(`dsh ${opts.args.join(' ')} did not finish within ${timeoutMs} ms and was killed`)
     }, timeoutMs)
     child.stdout?.setEncoding('utf8')
     child.stderr?.setEncoding('utf8')
     child.stdout?.on('data', (chunk: string) => {
       stdout += chunk
-      if (stdout.length > MAX_OUTPUT_CHARS) reject(new Error(`dsh ${opts.args.join(' ')} produced more output than the bridge will buffer`))
+      if (stdout.length > MAX_OUTPUT_CHARS) failRun(`dsh ${opts.args.join(' ')} produced more output than the bridge will buffer`)
     })
     child.stderr?.on('data', (chunk: string) => {
       stderr += chunk
-      if (stderr.length > MAX_OUTPUT_CHARS) reject(new Error(`dsh ${opts.args.join(' ')} produced more output than the bridge will buffer`))
+      if (stderr.length > MAX_OUTPUT_CHARS) failRun(`dsh ${opts.args.join(' ')} produced more output than the bridge will buffer`)
     })
     child.on('error', (err) => {
+      if (settled) return
+      settled = true
       clearTimeout(timer)
       reject(new Error(`dsh ${opts.args.join(' ')} could not run: ${err.message}`))
     })
     child.on('close', (code) => {
+      if (settled) return
+      settled = true
       clearTimeout(timer)
       resolve({ code: code ?? -1, stdout, stderr })
     })
@@ -88,10 +108,27 @@ export async function requireDsh(opts: DshRunOptions): Promise<DshResult> {
  * the entry mode in dsh 0.2.x: `dsh web --profile x` is rejected outright, and
  * a profile built from `headless` has no web server at all, so this template
  * choice is what makes "Open harness" possible.
+ *
+ * The manifest must PARSE to count as created: a window closed mid-creation
+ * can leave a half-written directory, and trusting its mere existence wedges
+ * every later prepare on a profile nothing can load.
  */
 export async function ensureProfile(opts: { binPath: string; dshHome: string; profile: string; manifestFile: string }): Promise<void> {
-  if (existsSync(opts.manifestFile)) return
+  if (profileManifestUsable(opts.manifestFile)) return
+  if (existsSync(opts.manifestFile)) {
+    // Present but broken: rebuild from scratch rather than build on rubble.
+    rmSync(path.dirname(opts.manifestFile), { recursive: true, force: true })
+  }
   await requireDsh({ ...opts, args: ['--profile', opts.profile, '--from-default-profile', 'web', '--dump-config'], timeoutMs: 300_000 })
+}
+
+function profileManifestUsable(manifestFile: string): boolean {
+  try {
+    const parsed = JSON.parse(readFileSync(manifestFile, 'utf8')) as unknown
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+  } catch {
+    return false
+  }
 }
 
 /**

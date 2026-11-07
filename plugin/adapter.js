@@ -7,7 +7,7 @@
 import { LlmAdapter, LlmError, isContextWindowExceededError, isQuotaExceededError, offloadedImageText } from '@deepseek-ai/dsh-llm'
 import path from 'node:path'
 import { toWireMessages, toRequestTools } from './project.js'
-import { toDshUsage, writeUsageRecord } from './usage-convert.js'
+import { toDshUsage, sumDshUsages, writeUsageRecord } from './usage-convert.js'
 import { activeTracker } from './active.js'
 
 const PROVIDER = 'vllmc'
@@ -138,7 +138,15 @@ export function createVllmcAdapter({ core, snapshot, deps = {} }) {
     }
 
     async resolveModel(_provider, model) {
-      const descriptor = await describe(model)
+      // Session create resolves through here; a dead server must surface as a
+      // dsh-classified provider error, not as a raw core probe exception that
+      // reads as a plugin crash (the plan's error-translation duty).
+      let descriptor
+      try {
+        descriptor = await describe(model)
+      } catch (err) {
+        throw mapError(err)
+      }
       return {
         provider: PROVIDER,
         id: model,
@@ -242,10 +250,45 @@ export function createVllmcAdapter({ core, snapshot, deps = {} }) {
         let index = -1
         let textBlock = null
         let reasoningBlock = null
-        let completion = null
+        // The core emits attemptCompletion per attempt that ended with usage,
+        // and every one of those is a billed model call: each gets its own
+        // outbox record, written the moment it is final so a later retry
+        // failure cannot eat earlier metering. The dsh usage chunk sums them,
+        // because the harness shows one turn, not the core's retry algebra.
+        const completions = []
         for await (const event of iterator) {
           if (core.isAttemptCompletionEvent(event)) {
-            completion = event.attemptCompletion
+            completions.push(event.attemptCompletion)
+            if (outboxDir) {
+              writeUsageRecord(outboxDir, {
+                sessionId: options.sessionId,
+                purpose: options.purpose,
+                model: modelId,
+                wireModelId: assembled.wireModelId,
+                lastRequest: event.attemptCompletion.lastRequest,
+                elapsedMs: event.attemptCompletion.elapsedMs,
+              })
+            }
+            continue
+          }
+          if ('attemptRestart' in event) {
+            // The core abandoned this attempt and re-asks the model (empty-
+            // response nudge, colon continuation, mid-stream replay). What
+            // streamed so far is final and stays on screen, same as the core's
+            // own Copilot consumer; the marker is the ONLY close signal when
+            // the relay sent no usage. Close open blocks so the retry's deltas
+            // open their own instead of merging into abandoned text.
+            for (const block of [reasoningBlock, textBlock]) {
+              if (block) {
+                yield {
+                  type: 'block-end',
+                  index: block.index,
+                  block: { type: block === reasoningBlock ? 'reasoning' : 'text', text: block.text },
+                }
+              }
+            }
+            reasoningBlock = null
+            textBlock = null
             continue
           }
           if (event.error) throw new Error(`Server error (mid-stream): ${event.error}`)
@@ -266,7 +309,7 @@ export function createVllmcAdapter({ core, snapshot, deps = {} }) {
             textBlock.text += event.content
             yield { type: 'text-delta', index: textBlock.index, text: event.content }
           }
-          for (const call of event.finishedToolCalls) {
+          for (const call of event.finishedToolCalls ?? []) {
             const toolIndex = ++index
             yield { type: 'block-start', index: toolIndex, blockType: 'tool-call' }
             yield { type: 'tool-call-delta', index: toolIndex, id: call.id, name: call.name, argumentsDelta: call.arguments }
@@ -288,18 +331,8 @@ export function createVllmcAdapter({ core, snapshot, deps = {} }) {
           }
         }
 
-        if (completion) {
-          yield { type: 'usage', usage: toDshUsage(completion.usage) }
-          if (outboxDir) {
-            writeUsageRecord(outboxDir, {
-              sessionId: options.sessionId,
-              purpose: options.purpose,
-              model: modelId,
-              wireModelId: assembled.wireModelId,
-              lastRequest: completion.lastRequest,
-              elapsedMs: completion.elapsedMs,
-            })
-          }
+        if (completions.length > 0) {
+          yield { type: 'usage', usage: sumDshUsages(completions.map((c) => toDshUsage(c.usage))) }
         }
 
         if (signal.aborted) {

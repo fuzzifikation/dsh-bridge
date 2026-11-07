@@ -34,7 +34,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { bridgePaths, ensureBridgeDirs } from '../out/bridge/paths.js'
 import { Bridge } from '../out/bridge/bridge.js'
 import { createCoreCatalogSource } from '../out/bridge/core-catalog.js'
-import { classifyPidRecord, probeHarness } from '../out/bridge/supervisor.js'
+import { classifyPidRecord, isProcessAlive, probeHarness } from '../out/bridge/supervisor.js'
 import { startDemoBackend } from './demo-backend.mjs'
 import { describeDshVersion } from './dsh-version.mjs'
 
@@ -50,6 +50,18 @@ const PROFILE = 'vllmc'
 function fail(step, detail) {
   console.error(`FAIL: ${step}`)
   if (detail !== undefined) console.error(typeof detail === 'string' ? detail : JSON.stringify(detail, null, 2).slice(0, 4000))
+  // A failed run that leaves a harness alive poisons the NEXT run: the pid
+  // record, the port, and the lock all say "healthy" to whoever runs the
+  // rail next. Best effort, and never allowed to mask the real failure.
+  try {
+    const rec = JSON.parse(readFileSync(paths.pid, 'utf8'))
+    if (rec && typeof rec.pid === 'number') {
+      if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(rec.pid), '/T', '/F'], { stdio: 'ignore' })
+      else process.kill(rec.pid)
+    }
+  } catch {
+    /* nothing running, or not ours to kill */
+  }
   process.exit(1)
 }
 function ok(step, detail = '') {
@@ -120,23 +132,26 @@ const stub = createServer((req, res) => {
 await new Promise((resolve) => stub.listen(0, '127.0.0.1', resolve))
 const stubUrl = `http://127.0.0.1:${stub.address().port}`
 
-/** Ledger stand-in with the real contract: dedup by recordId, ack what you settled. */
-function fakeLedger() {
-  const seen = new Set()
+/**
+ * Ledger stand-in running the REAL accept/duplicate/preReset/rejected decision
+ * from the staged core (usage/ingest.js imports nothing, so it loads with no
+ * node_modules). A hand-rolled dedupe here once kept the rail green while the
+ * shipped decision code drifted; the rail certifies against the shipped
+ * judgment or it certifies nothing.
+ */
+async function realLedger() {
+  const ingestFile = path.join(paths.vendor.core, 'core', 'usage', 'ingest.js')
+  if (!existsSync(ingestFile)) fail('the staged core carries no usage/ingest.js: stage a vLLM-Copilot with the handoff API')
+  const { ingestExternalUsage } = await import(pathToFileURL(ingestFile).href)
+  let seenIds = []
   return {
     apiVersion: 1,
     accepted: [],
     async recordExternalRequests(records) {
-      const out = { accepted: [], duplicate: [], preReset: [] }
-      for (const record of records) {
-        if (seen.has(record.recordId)) out.duplicate.push(record.recordId)
-        else {
-          seen.add(record.recordId)
-          out.accepted.push(record.recordId)
-        }
-      }
-      this.accepted.push(...out.accepted)
-      return out
+      const { outcome, nextSeenIds } = ingestExternalUsage(records, { seenIds, barriers: {} })
+      seenIds = nextSeenIds
+      this.accepted.push(...outcome.accepted)
+      return outcome
     },
   }
 }
@@ -244,6 +259,12 @@ ok('adoption', 'second window reused the running harness')
     )
   }
   ok('mcp mount', `initialize x${mcpStub.hits.initialize}, tools/list x${mcpStub.hits.toolsList}, unauthorized ${mcpStub.hits.unauthorized}`)
+  // The counts are the contract, not decoration: an initialize that never
+  // reaches tools/list leaves every editor tool silently dead behind a
+  // healthy-looking bar, and any unauthorized dial means the bearer token
+  // the overlay generated is not the token dsh sends.
+  if (mcpStub.hits.unauthorized > 0) fail('the harness dialed the editor endpoint without a valid bearer token', mcpStub.hits)
+  if (mcpStub.hits.toolsList < 1) fail('the mcp mount initialized but never listed tools: editor tools would be silently dead', mcpStub.hits)
 }
 
 // A pid that is alive but does not answer must never be adopted: that is a
@@ -304,7 +325,7 @@ if (deferred.deferred !== before.length || outboxFiles().length !== before.lengt
 }
 ok('ingest without a ledger', `${deferred.deferred} record(s) kept for later`)
 
-ledgerPort = fakeLedger()
+ledgerPort = await realLedger()
 const firstPass = await bridge.ingest()
 if (firstPass.accepted !== before.length || outboxFiles().length !== 0) {
   fail('records were not handed over exactly once', firstPass)
@@ -321,7 +342,10 @@ const stopped = await bridge.stop()
 if (!stopped.drained) fail('stop reported undrained requests', stopped)
 if (existsSync(paths.pid)) fail('pid file survived stop()')
 if (classifyPidRecord(paths.pid).kind !== 'none') fail('pid record still readable after stop')
-ok('stop', 'pid cleared, nothing in flight')
+// The file vanishing is not the proof; the PROCESS dying is. A stop that
+// deletes records around a live harness is the orphan factory.
+if (isProcessAlive(state.record.pid)) fail('the harness process survived stop()', state.record.pid)
+ok('stop', 'pid cleared, process gone, nothing in flight')
 
 await backend.close()
 stub.close()

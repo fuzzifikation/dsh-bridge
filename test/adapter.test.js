@@ -293,6 +293,50 @@ describe('usage accounting', () => {
   })
 })
 
+describe('retried turns (core attemptRestart contract)', () => {
+  // The core yields a bare { attemptRestart: true } between attempts. The
+  // first production adapter walked event.finishedToolCalls on it and died
+  // with a TypeError on every retried turn, invisible because every fixture
+  // pinned maxRetries to 0. These fixtures keep the retry leg of the contract
+  // under current: nudge, colon continuation, per-attempt metering.
+  function retrySnapshot(snapshot) {
+    snapshot.maxRetries = 1
+  }
+
+  it('catches the retry crash: an empty-reply nudge ends as the retried answer, not a request failure', async () => {
+    await setup(retrySnapshot)
+    backend.script({ reply: '' }, { reply: 'RETRY-OK' })
+    const chunks = await collect(adapter.stream(options()))
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+    const text = chunks.filter((c) => c.type === 'text-delta').map((c) => c.text).join('')
+    expect(text).toBe('RETRY-OK')
+    expect(backend.requests).toHaveLength(2)
+    // Nudged first call was billed too: one metered record per attempt, and the
+    // usage chunk carries the summed turn (2 x 500/40 from the demo default).
+    expect(readdirSync(outbox)).toHaveLength(2)
+    const usage = chunks.filter((c) => c.type === 'usage')
+    expect(usage).toHaveLength(1)
+    expect(usage[0].usage).toEqual({ inputTokens: 1000, outputTokens: 80, totalTokens: 1080 })
+  })
+
+  it('catches the merged replay: a colon continuation closes the streamed block before the retry opens its own', async () => {
+    await setup(retrySnapshot)
+    backend.script({ reply: 'wait:' }, { reply: 'the rest' })
+    const chunks = await collect(adapter.stream(options()))
+    const ends = chunks.filter((c) => c.type === 'block-end')
+    expect(ends.map((c) => c.block.text)).toEqual(['wait:', 'the rest'])
+    expect(ends[0].index).not.toBe(ends[1].index)
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('catches unclean resolveModel failures: a dead server is a classified LlmError, never a raw core throw', async () => {
+    await setup((snapshot) => {
+      snapshot.config.servers[0].serverUrl = 'http://127.0.0.1:1'
+    })
+    await expect(adapter.resolveModel('vllmc', 'm1')).rejects.toBeInstanceOf(LlmError)
+  })
+})
+
 describe('auxiliary calls', () => {
   it('catches premium-title burn: session-title routes to the snapshot cheap model and stays metered', async () => {
     await setup()

@@ -38,6 +38,10 @@ export function writePin(version, file = pinFile) {
 /** Effective version for this process, with any override made visible. */
 export function describeDshVersion(env = process.env) {
   const override = env.DSH_VERSION?.trim()
+  // The override string is interpolated into an `npm install` command line,
+  // so it gets the pin's exactness discipline or the canary runs whatever
+  // `DSH_VERSION` was set to, range specifiers and shell metacharacters included.
+  if (override) assertExact(override, 'DSH_VERSION override')
   const pinned = readPin()
   return { version: override || pinned, pinned, overridden: Boolean(override && override !== pinned) }
 }

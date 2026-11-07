@@ -13,7 +13,7 @@
  * Requires Node >= 22, npm, pnpm, git on PATH.
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { startDemoBackend } from './demo-backend.mjs'
@@ -93,8 +93,24 @@ try {
     if (created.status !== 0) fail('profile creation', created)
   }
 
+  // Force a genuine re-link from the CURRENT stage. A file: dependency whose
+  // copy already sits in the profile's store makes `plugin add` a silent
+  // no-op, and the boot check then certifies the PREVIOUS plugin build: a
+  // broken adapter sails through a green gate. Nuke the resolved tree, keep
+  // the lockfile so the store does the fast work.
+  rmSync(path.join(dshHome, 'profiles', PROFILE, 'node_modules'), { recursive: true, force: true })
   const added = dsh(['plugin', '--profile', PROFILE, 'add', 'file:' + pluginStage.replace(/\\/g, '/')])
   if (added.status !== 0) fail('dsh plugin add (staged plugin with core file: dep)', added)
+
+  // Certify the claim instead of trusting the command's exit code: the bytes
+  // the profile resolves must be the bytes we just staged.
+  const linkedAdapter = path.join(dshHome, 'profiles', PROFILE, 'node_modules', '@fuzzifikation', 'dsh-adapter-vllmc', 'adapter.js')
+  if (
+    !existsSync(linkedAdapter) ||
+    readFileSync(linkedAdapter, 'utf8') !== readFileSync(path.join(pluginStage, 'adapter.js'), 'utf8')
+  ) {
+    fail('the profile does not run the staged adapter (stale link)', null)
+  }
 
   const dumped = dsh(['--profile', PROFILE, '--dump-config'])
   if (dumped.status !== 0) fail('dump-config', dumped)

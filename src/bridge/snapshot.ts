@@ -115,7 +115,9 @@ function usableAux(
     }
     out.modelId = mapped
   }
-  if (typeof choice.maxTokens === 'number' && choice.maxTokens > 0) out.maxTokens = Math.floor(choice.maxTokens)
+  // Floor of 1: a maxTokens of 0.7 is a user reaching for "tiny", and a
+  // silent floor to 0 asks the server for an empty completion every time.
+  if (typeof choice.maxTokens === 'number' && choice.maxTokens > 0) out.maxTokens = Math.max(1, Math.floor(choice.maxTokens))
   return Object.keys(out).length ? out : undefined
 }
 
@@ -157,6 +159,10 @@ export function buildSnapshot(input: SnapshotInput): SnapshotPayload {
     typeof m?.displayName === 'string' && m.displayName.trim() ? m.displayName.trim() : undefined
   // Friendly text for warnings: users know display names, not generated ids.
   const registryLabel = (modelId: string): string => displayNameOf(models.find((m) => m.id === modelId)) ?? modelId
+  // The core's verdict reasons quote the failing fetch, and a fetch error
+  // text carries the full server URL. Warnings land in the bridge log and in
+  // snapshot.json on disk: private hostnames never ride along.
+  const privacySafe = (text: string): string => text.replace(/https?:\/\/\S+/g, '[the server URL]')
 
   // Drop models the core demonstrably found absent (see ServedVerdict).
   // `unknown` is never pruned: an unaskable server keeps its whole catalog.
@@ -165,7 +171,7 @@ export function buildSnapshot(input: SnapshotInput): SnapshotPayload {
     const verdict = served[m.id]
     if (!verdict || verdict.state !== 'absent') return true
     warn(
-      `model "${registryLabel(m.id)}" is not currently served by its server${verdict.reason ? `: ${verdict.reason}` : ''}; it is not offered to the harness`,
+      `model "${registryLabel(m.id)}" is not currently served by its server${verdict.reason ? `: ${privacySafe(verdict.reason)}` : ''}; it is not offered to the harness`,
     )
     return false
   })
@@ -210,14 +216,20 @@ export function buildSnapshot(input: SnapshotInput): SnapshotPayload {
   const personalityFiles = input.personalityFiles ?? {}
   const registryIdOf = (key: string): string => newToOld.get(key) ?? key
   const wanted = rekeyed.map((m) => ({ model: m, file: personalityFiles[registryIdOf(m.id)] })).filter((x) => x.file !== undefined)
-  if (wanted.length > 1) {
-    warn(
-      `several models carry their own personality file; the harness applies one personality per session, so "${label(defaultModelId)}" wins. Other models run without their personality file.`,
-    )
-  }
   // `personalityFiles` arrives keyed by REGISTRY id; the default is a display
   // key, so the lookup crosses back through the re-key map.
   const personalityFile = personalityFiles[registryIdOf(defaultModelId)]
+  if (wanted.length > 1) {
+    // The harness applies one personality per session. Which sentence is
+    // true depends on whether the DEFAULT carries a file: with one, it wins;
+    // without one, no personality applies at all, and saying "the default
+    // wins" would be a fairy tale.
+    warn(
+      personalityFile
+        ? `several models carry their own personality file; the harness applies one personality per session, so "${label(defaultModelId)}" wins. Other models run without their personality file.`
+        : `several models carry their own personality file, but the default model carries none; the harness applies one personality per session, so no personality takes effect. Move the personality file onto the default model.`,
+    )
+  }
 
   const snapshot: SnapshotPayload = {
     config: { servers, models: rekeyed },
@@ -240,9 +252,22 @@ export function buildSnapshot(input: SnapshotInput): SnapshotPayload {
 /**
  * Stable text for change detection: rewrite the file only when the content the
  * harness will actually read has changed. `warnings` is excluded because it
- * describes how the build went, not what the plugin loads.
+ * describes how the build went, not what the plugin loads. Keys are sorted
+ * recursively: the registry stores open records, and two objects that differ
+ * only in key ORDER are the same content, so an order-sensitive fingerprint
+ * would rewrite the snapshot (and reload the harness's view of it) on pure
+ * serialization noise.
  */
 export function snapshotFingerprint(document: unknown): string {
   const { warnings: _warnings, ...rest } = document as { warnings?: unknown }
-  return JSON.stringify(rest)
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical)
+    if (typeof value === 'object' && value !== null) {
+      const out: Record<string, unknown> = {}
+      for (const key of Object.keys(value).sort()) out[key] = canonical((value as Record<string, unknown>)[key])
+      return out
+    }
+    return value
+  }
+  return JSON.stringify(canonical(rest))
 }

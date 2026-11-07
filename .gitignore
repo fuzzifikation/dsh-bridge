@@ -3,6 +3,7 @@ out/
 out-e2e/
 *.vsix
 temp/
+.tools/
 .vscode-test/
 .vllm/
 .dsh/

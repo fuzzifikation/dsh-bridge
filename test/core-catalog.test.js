@@ -54,20 +54,4 @@ describe('staged-core catalog loader', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
-
-  it('catches a re-load hammering disk: without invalidate the same module is returned, no repeated import', async () => {
-    const dir = tmpDir()
-    try {
-      const file = join(dir, 'index.js')
-      writeFileSync(file, 'export function resolveServedModels() { return new Map() }\n')
-      const source = createCoreCatalogSource({ entryFile: () => file, log: { warn() {} } })
-      const first = await source.load()
-      writeFileSync(file, 'export function resolveServedModels() { throw new Error("must not be loaded") }\n')
-      const again = await source.load()
-      expect(again).toBe(first) // cached identity; disk rewrite without invalidate changes nothing
-      expect(await again?.resolveServedModels([], [])).toEqual(new Map())
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
 })

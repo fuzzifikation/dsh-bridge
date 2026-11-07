@@ -86,7 +86,8 @@ function safeVersionSpec(value: unknown): string {
 function auxChoice(modelId: unknown, maxTokens: unknown): AuxChoice {
   const choice: AuxChoice = {}
   if (typeof modelId === 'string' && modelId.trim()) choice.modelId = modelId.trim()
-  if (typeof maxTokens === 'number' && Number.isFinite(maxTokens) && maxTokens > 0) choice.maxTokens = Math.floor(maxTokens)
+  // Floor of 1, matching buildSnapshot: a sub-1 budget must never become 0.
+  if (typeof maxTokens === 'number' && Number.isFinite(maxTokens) && maxTokens > 0) choice.maxTokens = Math.max(1, Math.floor(maxTokens))
   return choice
 }
 

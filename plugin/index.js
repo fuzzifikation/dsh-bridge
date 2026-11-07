@@ -48,12 +48,22 @@ export function apply(ctx) {
       }
     },
   }
-  return import('vllm-copilot-core').then((core) => {
-    const adapter = createVllmcAdapter({ core, snapshot, deps: adapterDeps })
-    const registration = ctx.llm.registerAdapter(['vllmc'], adapter)
-    ctx.effect(() => () => registration())
-    ctx.logger.info(
-      `vllmc adapter registered: ${snapshot.config.models.length} model(s), default '${snapshot.defaultModelId}' (snapshot v${snapshot.version})`,
-    )
-  })
+  return import('vllm-copilot-core')
+    .then((core) => {
+      const adapter = createVllmcAdapter({ core, snapshot, deps: adapterDeps })
+      const registration = ctx.llm.registerAdapter(['vllmc'], adapter)
+      ctx.effect(() => () => registration())
+      ctx.logger.info(
+        `vllmc adapter registered: ${snapshot.config.models.length} model(s), default '${snapshot.defaultModelId}' (snapshot v${snapshot.version})`,
+      )
+    })
+    .catch((err) => {
+      // Without this the rejection escapes the plugin host as an anonymous
+      // crash. The dominant cause is a stale file: link from a bridge update
+      // that has not restaged, and the user deserves to be told exactly that.
+      ctx.logger.error(
+        `vllmc bridge: the staged vLLM-Copilot core failed to load (${err?.message ?? err}). ` +
+          'Start the harness from the editor to restage the vendor trees, or remove this bundle.',
+      )
+    })
 }

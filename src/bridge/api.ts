@@ -75,11 +75,25 @@ function isRecord(value: unknown): value is ExternalRequestRecord {
   const r = v.request
   if (typeof r !== 'object' || r === null) return false
   const req = r as Record<string, unknown>
+  // The floor mirrors the core's own accountability check (core/usage/ingest.ts
+  // toRequest): non-empty urls, finite non-negative counters, a positive
+  // timestamp. A record below this floor would come back `rejected`, and
+  // rejected ids are settled, meaning the queue file gets DELETED. Anything
+  // we can tell is poison must be quarantined here, not mailed for deletion.
+  const counter = (key: string): boolean => typeof req[key] !== 'number' || (Number.isFinite(req[key] as number) && (req[key] as number) >= 0)
   return (
     typeof req.serverUrl === 'string' &&
+    req.serverUrl.length > 0 &&
     typeof req.modelId === 'string' &&
+    req.modelId.length > 0 &&
+    typeof req.timestamp === 'number' &&
+    Number.isFinite(req.timestamp) &&
+    req.timestamp > 0 &&
     typeof req.promptTokens === 'number' &&
-    typeof req.completionTokens === 'number'
+    typeof req.completionTokens === 'number' &&
+    counter('promptTokens') &&
+    counter('completionTokens') &&
+    counter('totalTokens')
   )
 }
 

@@ -113,11 +113,16 @@ export function mcpPresetChildLines(endpoint) {
   ]
 }
 
-/** All `- id: <name>` row ids present anywhere in a dump. */
+/**
+ * Top-level row ids only: rows live at column 0 in a dump, and a nested
+ * `- id:` (a preset child named like a row) must never convince the generator
+ * that a privacy row exists. A false positive there skips the row's disable
+ * line and phones home with a smile.
+ */
 export function rowIds(dumpText) {
   const ids = new Set()
   for (const line of dumpText.split(/\r?\n/)) {
-    const m = line.match(/^\s*-?\s*id:\s*'?([\w.@/-]+)'?\s*$/)
+    const m = line.match(/^- id:\s*'?([\w.@/-]+)'?\s*$/)
     if (m) ids.add(m[1])
   }
   return ids
@@ -203,13 +208,23 @@ export function buildOverlay(dumpText, { provider = 'vllmc', model, mcpEndpoint 
     throw new Error(`row '${DEFAULT_MODEL_ROW}' not found in the dump; cannot aim the default model at ${provider}/${model}`)
   }
 
-  // Preserve the row's existing config keys, then override provider+model. The
-  // last duplicate key wins in dsh's YAML load, and we never emit the same key
-  // twice: carried keys that we set are dropped from the carry-over.
+  // Drop only the row's OWN provider/model keys (exactly the row config's
+  // indent). A deeper provider/model belongs to a nested map and must travel
+  // verbatim; an indent-blind filter used to delete those silently.
   const carried = rowConfigLines(dumpText, DEFAULT_MODEL_ROW).filter(
-    (l) => !/^\s*(provider|model):/.test(l),
+    (l) => !/^ {4}(provider|model):/.test(l),
   )
-  lines.push(`- id: ${DEFAULT_MODEL_ROW}`, '  config:', ...carried, `    provider: ${provider}`, `    model: ${model}`)
+  lines.push(
+    `- id: ${DEFAULT_MODEL_ROW}`,
+    '  config:',
+    ...carried,
+    // JSON quoting is YAML quoting: the model is a user-chosen display name,
+    // and an unquoted "gpt: fast" turns the row into a broken mapping while
+    // "gpt #1" truncates at the comment marker. Boot dies or aims the wrong
+    // model; neither is acceptable for a name typed by a user.
+    `    provider: ${JSON.stringify(provider)}`,
+    `    model: ${JSON.stringify(model)}`,
+  )
 
   // State the Preview Notice acknowledgement (owner ruling 2026-10-05, see
   // WELCOME_NOTICE_ACK_* above). Restating the row replaces its whole config,

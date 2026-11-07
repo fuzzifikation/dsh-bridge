@@ -25,7 +25,16 @@ export async function startDemoBackend({ models } = {}) {
       let raw = ''
       req.on('data', (c) => (raw += c))
       req.on('end', () => {
-        const body = JSON.parse(raw)
+        let body
+        try {
+          body = JSON.parse(raw)
+        } catch {
+          // A test bug must fail the test, not kill the rail process with an
+          // uncaught exception inside the request handler.
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: { message: 'demo backend received a non-JSON request body' } }))
+          return
+        }
         requests.push({ headers: req.headers, body })
         const spec = queue.shift() ?? { reply: 'mock reply' }
         if (spec.status) {

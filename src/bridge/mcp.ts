@@ -39,10 +39,9 @@ export interface McpServerInfo {
   version: string
 }
 
-/** JSON-RPC error codes we can produce: method not found, bad request, internal. */
+/** JSON-RPC error codes we can produce: method not found, bad request. */
 const NOT_FOUND = -32601
 const INVALID_REQUEST = -32600
-const PARSE_ERROR = -32700
 
 interface JsonRpcMessage {
   jsonrpc?: unknown
@@ -83,7 +82,10 @@ export async function handleMcpRequest(
   body: unknown,
   deps: { tools: () => McpTool[]; serverInfo: McpServerInfo; signal: AbortSignal },
 ): Promise<McpReply> {
-  if (!isObject(body)) return fail(null, PARSE_ERROR, 'expected a JSON object')
+  // The body already parsed (a parse failure is answered at the transport),
+  // so a non-object here is a well-formed JSON-RPC REQUEST that makes no
+  // sense: INVALID_REQUEST, not PARSE_ERROR. No id exists to answer.
+  if (!isObject(body)) return fail(null, INVALID_REQUEST, 'expected a JSON object')
   const message = body as JsonRpcMessage
   const id = requestId(message)
   if (id === undefined) {
@@ -126,7 +128,15 @@ export async function handleMcpRequest(
       const name = typeof params.name === 'string' ? params.name : ''
       const args = isObject(params.arguments) ? params.arguments : {}
       const tool = deps.tools().find((t) => t.name === name)
-      if (!tool) return fail(id, NOT_FOUND, `no such tool: ${JSON.stringify(name)}`)
+      // An unknown tool is a tool failure the model can correct, not a
+      // protocol fault: content keeps the reason in the transcript instead
+      // of whatever the client's RPC-error path decides to render.
+      if (!tool) {
+        return reply(id, {
+          content: [{ type: 'text', text: `no such tool: ${JSON.stringify(name)}. Call tools/list to see what exists.` }],
+          isError: true,
+        })
+      }
       try {
         const outcome = await tool.run(args, deps.signal)
         return reply(id, { content: [{ type: 'text', text: outcome.text }], ...(outcome.isError ? { isError: true } : {}) })

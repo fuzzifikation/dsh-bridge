@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
@@ -14,10 +15,12 @@ import path from 'node:path'
  * a read-only or racing filesystem can never wedge the harness.
  */
 export function activeTracker(dir, log = { appendLine() {} }) {
-  let seq = 0
   return {
     begin(info) {
-      const id = `${Date.now()}-${process.pid}-${++seq}`
+      // A uuid, not a timestamp: a pid can be recycled into a second harness
+      // sharing this DSH_HOME, and "same millisecond after pid reuse" is a
+      // collision two markers can actually hit. The uuid cannot.
+      const id = `${Date.now()}-${process.pid}-${randomUUID()}`
       const target = path.join(dir, `${id}.json`)
       try {
         mkdirSync(dir, { recursive: true })

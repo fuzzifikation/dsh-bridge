@@ -429,6 +429,15 @@ export class Supervisor {
         for (const line of chunk.split('\n')) settle(line, 'stderr')
       })
       void exited.then((info) => {
+        // The URL line can be the last bytes ever written, with no trailing
+        // newline to trigger the split: flush the held buffer before
+        // declaring failure, or a harness that announced itself correctly
+        // dies as "exited before reporting a URL".
+        if (stdoutBuffer) {
+          const rest = stdoutBuffer
+          stdoutBuffer = ''
+          settle(rest, 'stdout')
+        }
         if (!this.url) {
           reject(new Error(`harness exited before reporting a URL (code ${info.code}, signal ${info.signal})\n${this.tail.slice(-1500)}`))
         }
@@ -446,7 +455,17 @@ export class Supervisor {
     // A process that dies right after announcing itself must be reported, not
     // shown as a healthy status bar.
     void exited.then((info) => {
-      if (!this.stopping && info.code !== 0) o.onUnexpectedExit?.(info)
+      if (this.stopping || info.code === 0) return
+      // Another window's Stop clears (or replaces) the pid record while our
+      // child dies: that exit is deliberate, and screaming "exited on its
+      // own" at the owning window is a lie. A real crash leaves the record
+      // naming our pid, so the warning keeps its teeth.
+      const record = readPidRecord(o.pidFile)
+      if (child.pid !== undefined && record?.pid !== child.pid) {
+        o.log.info('harness exited after the pid record moved on; treating it as a deliberate stop from another window')
+        return
+      }
+      o.onUnexpectedExit?.(info)
     })
     return url
   }
@@ -465,9 +484,19 @@ export class Supervisor {
     const child = this.child
     if (!child || child.exitCode !== null) {
       // An adopted harness belongs to another window. Stopping it here is the
-      // user's explicit request, and the pid is one we verified by probe, so a
-      // tree kill is honest. The other window then sees it vanish and can start
-      // its own, which is the correct outcome for "Stop" in this window.
+      // user's explicit request, and a tree kill is honest ONLY while the pid
+      // record still names the very pid we adopted: minutes can pass between
+      // adopt and Stop, the owner may have replaced the harness in that time,
+      // and /F /T on a recycled pid is how unrelated processes die.
+      const fresh = readPidRecord(o.pidFile)
+      if (adopted !== undefined && fresh !== undefined && fresh.pid !== adopted) {
+        o.log.info('the borrowed harness was already replaced by its owning window; leaving the replacement running')
+        return drain
+      }
+      // Clear the record BEFORE the kill: the owning window's exit handler
+      // reads it to tell a deliberate stop from a crash, and a record still
+      // naming its child at exit time would scream a false alarm at it.
+      clearPidRecord(o.pidFile)
       if (adopted !== undefined && isProcessAlive(adopted)) {
         terminateOnce(adopted, false)
         const deadline = Date.now() + 10_000
@@ -477,9 +506,10 @@ export class Supervisor {
           o.log.warn('adopted harness did not exit within 10 s, forced')
         }
       }
-      clearPidRecord(o.pidFile)
       this.child = undefined
       this.url = undefined
+      // The sweep may not burn a replacement harness either; the early return
+      // above already covered the replaced case.
       await (o.sweep ?? sweepDetachedHarnesses)(o.dshHome)
       return drain
     }
@@ -492,15 +522,15 @@ export class Supervisor {
       if (pid !== undefined) terminateOnce(pid, true)
       o.log.warn('harness did not exit within 10 s, forced')
     }
-    clearPidRecord(o.pidFile)
+    // Same ownership law as the adopted branch: while we drained, the record
+    // may have come to name another window's replacement. Clearing or sweeping
+    // it down would blind or kill it.
+    const freshOwn = readPidRecord(o.pidFile)
+    const ownsRecord = freshOwn === undefined || (pid !== undefined && freshOwn.pid === pid)
+    if (ownsRecord) clearPidRecord(o.pidFile)
     this.child = undefined
     this.url = undefined
-    await (o.sweep ?? sweepDetachedHarnesses)(o.dshHome)
+    if (ownsRecord) await (o.sweep ?? sweepDetachedHarnesses)(o.dshHome)
     return drain
-  }
-
-  async restart(opts: { drainMs?: number } = {}): Promise<string> {
-    await this.stop(opts)
-    return this.start()
   }
 }

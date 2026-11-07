@@ -22,7 +22,7 @@
  * version exactly, and that version must exist on npm.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
-import { readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describeDshVersion, readPin, writePin } from './dsh-version.mjs'
@@ -41,24 +41,23 @@ const npmExists = (spec) => {
     return false
   }
 }
-function writeJson(file, value) {
-  writeFileSync(`${file}.tmp`, JSON.stringify(value, null, 2) + '\n')
-  renameSync(`${file}.tmp`, file)
-}
-
 function distTags() {
   return npmView([DSH_PKG, 'dist-tags'])
 }
 
-/** Set the plugin's declared dsh-llm peer (and the root devDependency used by fixtures). */
+/**
+ * Set the plugin's declared dsh-llm peer (and the root devDependency used by
+ * fixtures) by rewriting exactly the dependency line. A full JSON round trip
+ * would reflow the hand-compacted menu rows into dozens of changed lines, and
+ * an adoption that shows up as 150 lines of formatting noise hides the one
+ * line that matters. The existing range prefix (^ or exact) is preserved.
+ */
 function setPeer(version) {
-  const plugin = JSON.parse(readFileSync(pluginManifest, 'utf8'))
-  plugin.peerDependencies = { ...plugin.peerDependencies, [LLM_PKG]: version }
-  writeJson(pluginManifest, plugin)
-  const root = JSON.parse(readFileSync(rootManifest, 'utf8'))
-  if (root.devDependencies?.[LLM_PKG]) {
-    root.devDependencies[LLM_PKG] = version
-    writeJson(rootManifest, root)
+  const needle = new RegExp(`("${LLM_PKG.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"\\s*:\\s*"\\^?)[^"]+(")`)
+  for (const file of [pluginManifest, rootManifest]) {
+    const text = readFileSync(file, 'utf8')
+    if (!needle.test(text)) throw new Error(`setPeer: no ${LLM_PKG} dependency line in ${file}; the rail's assumption about the manifests broke`)
+    writeFileSync(file, text.replace(needle, `$1${version}$2`))
   }
 }
 
@@ -102,6 +101,12 @@ function adopt(version) {
     console.error(`dsh ${version} NOT adopted; pin stays ${readPin()}.`)
     process.exit(1)
   }
+  // probe() restores the manifests, so the certified peer must be written
+  // permanently here or the pin and the declared peer drift apart, and dsh's
+  // plugin manager polices exactly that pair at install time. Peer first:
+  // if anything fails between the two writes, the older pin still matches the
+  // older certified state instead of a fresh pin pointing at a stale peer.
+  setPeer(version)
   writePin(version)
   console.log(`\nadopted dsh ${version} (peer ${LLM_PKG}@${version}).`)
   console.log('Re-run `npm install` to sync the lockfile, then `npm test`.')

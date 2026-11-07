@@ -141,16 +141,27 @@ export async function ingestOutbox(
       outcome.deferred += batch.length
       continue
     }
-    const settled = new Set([
-      ...(result.accepted ?? []),
-      ...(result.duplicate ?? []),
-      ...(result.preReset ?? []),
-      ...(result.rejected ?? []),
-    ])
-    outcome.accepted += result.accepted?.length ?? 0
-    outcome.duplicate += result.duplicate?.length ?? 0
-    outcome.preReset += result.preReset?.length ?? 0
-    outcome.rejected += result.rejected?.length ?? 0
+    // A cross-extension call can return anything. Parsing a nonsense answer
+    // must not throw out of the whole pass: unreadable verdict means "nothing
+    // settled", keep the records, retry later.
+    let settled: Set<string>
+    try {
+      if (typeof result !== 'object' || result === null) throw new Error('the ledger returned no result object')
+      settled = new Set([
+        ...(result.accepted ?? []),
+        ...(result.duplicate ?? []),
+        ...(result.preReset ?? []),
+        ...(result.rejected ?? []),
+      ])
+      outcome.accepted += result.accepted?.length ?? 0
+      outcome.duplicate += result.duplicate?.length ?? 0
+      outcome.preReset += result.preReset?.length ?? 0
+      outcome.rejected += result.rejected?.length ?? 0
+    } catch (err) {
+      log.warn(`ledger returned an unusable answer, keeping ${batch.length} record(s) for retry: ${(err as Error).message}`)
+      outcome.deferred += batch.length
+      continue
+    }
     if (result.rejected?.length) {
       log.warn(`ledger refused ${result.rejected.length} usage record(s) as unaccountable: ${result.rejected.join(', ')}`)
     }

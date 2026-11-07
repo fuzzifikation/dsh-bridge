@@ -17,7 +17,7 @@
  * or a slow mirror gets its healthy holder's lock stolen. No `vscode`
  * import, and every wait is an option.
  */
-import { closeSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isProcessAlive, probeHarness, readPidRecord, type PidRecord } from './supervisor.js'
 
 export interface StartLockHandle {
@@ -35,6 +35,14 @@ export interface StartLockOptions {
   pollMs?: number
   /** A lock with a live holder older than this is presumed wedged. Default 15 min. */
   staleMs?: number
+  /**
+   * Gate on mid-wait adoption: a pid record answering the probe is only worth
+   * adopting when the caller accepts its composition. Pass the bridge's
+   * staleness check so the waiting path enforces the same law as the
+   * pre-lock path: a harness prepared by an older build is drained and
+   * replaced, never borrowed through the side door.
+   */
+  isAdoptable?: (record: PidRecord) => boolean | Promise<boolean>
 }
 
 export type StartLockOutcome =
@@ -80,8 +88,13 @@ export async function acquireStartLock(opts: StartLockOptions): Promise<StartLoc
             } catch {
               /* already closed */
             }
+            // Ownership guard: a holder slower than staleMs has its lock stolen,
+            // and a blind unlink here would then release the STEALER's live lock
+            // for a third window, re-enabling the concurrent prepare this whole
+            // file exists to prevent. Unlink only while the file still names us.
             try {
-              unlinkSync(opts.lockFile)
+              const raw = Number.parseInt(readFileSync(opts.lockFile, 'utf8').trim(), 10)
+              if (raw === holderPid) unlinkSync(opts.lockFile)
             } catch {
               /* already gone */
             }
@@ -103,7 +116,17 @@ export async function acquireStartLock(opts: StartLockOptions): Promise<StartLoc
     }
     if (!holderAlive || Date.now() - mtime > staleMs) {
       try {
-        unlinkSync(opts.lockFile)
+        // Claim the unlink atomically: a rename has exactly one winner, while
+        // two windows unlinking "the dead lock they saw" can each delete a
+        // lock the other just created, and both then 'wx'-create their own -
+        // two holders entering prepare over one runtime tree.
+        const claimed = `${opts.lockFile}.claimed-${holderPid}`
+        renameSync(opts.lockFile, claimed)
+        try {
+          unlinkSync(claimed)
+        } catch {
+          /* debris is harmless: the loop only ever creates the real name with 'wx' */
+        }
         opts.log?.info(`cleared the start lock of ${holderAlive ? 'a wedged' : 'a dead'} window`)
       } catch {
         /* lost the steal race, retry */
@@ -111,9 +134,10 @@ export async function acquireStartLock(opts: StartLockOptions): Promise<StartLoc
       continue
     }
 
-    // A live holder is doing real work; adopt if its harness announced itself.
+    // A live holder is doing real work; adopt if its harness announced itself
+    // AND the caller accepts the composition (see isAdoptable).
     const record = readPidRecord(opts.pidFile)
-    if (record && isProcessAlive(record.pid) && (await probeHarness(record.url))) {
+    if (record && isProcessAlive(record.pid) && (await probeHarness(record.url)) && (!opts.isAdoptable || (await opts.isAdoptable(record)))) {
       return { kind: 'adopt', record }
     }
     if (Date.now() >= deadline) return { kind: 'busy' }
