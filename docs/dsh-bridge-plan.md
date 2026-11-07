@@ -193,3 +193,45 @@ The harness ships as a chromeless editor surface: a `WebviewPanel` whose entire 
 7. **Response framing is Node's own**: upstream `transfer-encoding`/`content-length` are never copied into proxied responses.
 8. **The proxy binds 127.0.0.1 only, has zero npm dependencies and no vscode import** — it runs and is tested standalone.
 9. **One adoption path** serves fresh creation and serializer revival alike (view id per load, waiting card until the harness is reachable).
+
+### The machine, drawn (2026-11-07)
+
+Four OS-level programs, one shared library. Boxes are processes; arrows are the channels that actually fail, each with its own failure mode (spawn dies with the pill saying stopped, files queue while a peer is down, the panel URL survives everything the harness does). The core cylinder is the "called, never copied" ruling drawn literally: one staged `out/core`, imported in three processes that therefore cannot disagree.
+
+```mermaid
+flowchart LR
+  subgraph VS["VS Code window"]
+    PANEL["harness tab: WebviewPanel<br/>iframe of the embed proxy"]
+    subgraph HOST["extension host (Node process)"]
+      BR["dsh-vllm-bridge extension<br/>supervisor, snapshot, overlay,<br/>outbox drain, core consumer #2"]
+      VCC["vLLM-Copilot extension<br/>registry, dashboard, ledger<br/>core consumer #3"]
+      PROXY["embed proxy, fixed port<br/>cookie jar, 303 login, beacon"]
+      CTRL["control server /mcp<br/>bearer token, drain markers"]
+    end
+  end
+  subgraph DSHP["dsh web (separate Node process, own DSH_HOME)"]
+    LOOP["agent loop, tools, subagents<br/>(upstream, never forked)"]
+    ADP["adapter plugin<br/>core consumer #1: live request path"]
+    MCP["dsh-mcp-client mount"]
+    WEB["web server, ephemeral port<br/>token login, session cookie"]
+  end
+  CORE[("vLLM-Copilot core<br/>one vendored out/core")]
+  SRV["model servers<br/>vLLM, OpenRouter, LM Studio"]
+
+  BR -- "spawn (env: control token), pid record, start.lock" --> DSHP
+  BR -- "snapshot.json + cordis overlay (files)" --> ADP
+  LOOP -- "usage records: outbox + active dirs (files)" --> BR
+  BR -- "recordExternalRequests (extension API)" --> VCC
+  VCC -. "registry, served list (exported API)" .-> BR
+  ADP ==> CORE
+  BR -. "import staged copy" .-> CORE
+  VCC -. "its own build" .-> CORE
+  ADP -- "HTTPS streaming: sampling, personalities, stream policy" --> SRV
+  MCP -- "HTTP /mcp (bearer)" --> CTRL
+  CTRL -- "editor tools: files, diagnostics, terminal, ask" --> BR
+  PANEL -- "same-origin GET + WS; never sees a cookie" --> PROXY
+  PROXY -- "forward: host rewritten, jar injected, Set-Cookie stripped" --> WEB
+  EXT2["appWindow / external browser (opt-in doors)"] -. "top-level load, token URL" .-> WEB
+```
+
+What the figure is meant to make impossible to forget: the model-server data plane never touches VS Code, nothing enters the webview except what the proxy chose to serve, and every harness-bound edge is loopback-only.

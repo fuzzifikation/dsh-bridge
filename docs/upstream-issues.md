@@ -50,3 +50,11 @@ Evidence from our product (every byte here reproducible without it): a z-order r
 Request: repair the menu layer when such a view is destroyed or hidden, and ideally never let a child view outrank popup-weight DOM in the first place (hide or lower the native browser view while a workbench menu, quick pick, or context menu is up, the same dance every desktop app does with child windows).
 
 Current bridge posture: since the chromeless panel became the default door, the bridge no longer opens harness UIs in this browser view at all, and the poisoned-restore path is gone for its users; the `embedded` door keeps the view available, and for those users the stale-tab sweep (0.0.16) still closes dead harness tabs at activation, which keeps later sessions clean because a closed tab is never restored. It cannot heal the one session that arrives poisoned, because no in-window action short of `Developer: Reload Window` repairs the menus. Users of any extension (or any manual localhost tab) are still exposed with no workaround at all.
+
+## 5. The GUI markdown renderer highlights mermaid but has no diagram engine
+
+Certified on the pinned frontend bundle: KaTeX is fully vendored (math renders), and the Shiki `langs/` set even carries the mermaid grammar, so ```mermaid blocks come out syntax-highlighted — but no mermaid (or any diagram) engine ships in `dsh-web-frontend`, so the reader sees pretty source instead of the picture. Highlighting a language while silently lacking its renderer advertises a capability the GUI does not have.
+
+Ask: either vendor the mermaid renderer lazily (per-block, like the langs chunks already load) or drop its grammar from the highlighter set so unsupported fences stay obviously plain. Diagrams in chat answers are first-class documentation; every competing chat surface renders them.
+
+Current bridge posture: documentation diagrams are authored for VS Code's own markdown preview (which ships mermaid) and for the editor, not for chat replies. The architecture figure in docs/dsh-bridge-plan.md is written this way.
