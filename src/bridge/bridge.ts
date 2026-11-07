@@ -82,6 +82,12 @@ export interface BridgeDeps {
    */
   editorWorkspaceFolder?: () => string | undefined
   /**
+   * The plugin manager rewrote a profile file while the harness runs.
+   * The toggle persisted, but this dsh build cannot hot-apply it; the
+   * extension turns this into a "restart to apply" notice.
+   */
+  onProfileEdit?: (file: string) => void
+  /**
    * Editor control channel (loopback URL + bearer token), resolved when the
    * overlay is built and burned into the generated `dsh-mcp-client` row, so
    * the upstream plugin dials exactly this window's listener. Undefined means
@@ -145,13 +151,14 @@ export class Bridge {
     this.supervisor = new Supervisor({
       binPath: '',
       dshHome: deps.paths.root,
-      profile: 'vllmc',
-      overlayPath: deps.paths.overlay,
+      profile: 'vllmc',
       pidFile: deps.paths.pid,
       activeDir: deps.paths.active,
       dshVersion: deps.dshVersion,
       log: deps.log,
       onUnexpectedExit: (info) => deps.onUnexpectedExit?.(info),
+      profileDir: deps.paths.profile,
+      onProfileEdit: (file) => this.deps.onProfileEdit?.(file),
     })
   }
 
@@ -327,6 +334,14 @@ export class Bridge {
    * decorative, so the dump is the only honest input: rows that vanished or
    * renamed must stop the boot rather than compose a profile that keeps
    * phoning home.
+   *
+   * The rows are merged into the profile's own patch layer between markers.
+   * They are never passed as --patch at boot: an include created with a
+   * patches config is not recorded as the root Include entry, and every live
+   * profile reload (every plugin toggle) then fails with "profile reload
+   * requires the root Include entry" (docs/upstream-issues.md). The patch
+   * layer is also where the plugin manager writes, so the merge preserves
+   * every row the user's toggles created outside the generated block.
    */
   private async buildOverlay(runtime: DshRuntime): Promise<OverlayModule & { disabled: number }> {
     const overlay = await loadOverlay(this.deps.extensionRoot)
@@ -339,13 +354,23 @@ export class Bridge {
     const snapshot = this.readSnapshotDefault()
     const mcpEndpoint = this.deps.controlEndpoint?.()
     const result = overlay.buildOverlay(dump, { provider: 'vllmc', model: snapshot.defaultModelId, ...(mcpEndpoint ? { mcpEndpoint } : {}) })
-    mkdirSync(path.dirname(this.deps.paths.overlay), { recursive: true })
-    writeFileSync(`${this.deps.paths.overlay}.tmp`, result.yml)
-    renameSync(`${this.deps.paths.overlay}.tmp`, this.deps.paths.overlay)
+    const patchFile = path.join(this.deps.paths.profile, 'cordis.patch.yml')
+    const existing = existsSync(patchFile) ? readFileSync(patchFile, 'utf8') : ''
+    const merged = overlay.mergePatchLayer(existing, result.yml)
+    if (merged !== existing) {
+      writeFileSync(`${patchFile}.tmp`, merged)
+      renameSync(`${patchFile}.tmp`, patchFile)
+      // Our own regeneration is not a change to restart for; the watcher
+      // must recognize the bytes.
+      this.supervisor.recordOwnProfileWrite(patchFile, merged)
+    }
+    // The pre-patch-layer artifact: stale text with a stale token, and the one
+    // file someone could still hand to --patch to undo this fix by accident.
+    rmSync(this.deps.paths.overlay, { force: true })
     // The label, not the id: our generated config ids embed hostnames, and logs
     // print wire ids and display names only.
     this.deps.log.info(
-      `overlay regenerated: ${result.disabled} rows disabled, default model "${snapshot.wireLabel}", ` +
+      `patch layer regenerated: ${result.disabled} rows disabled, default model "${snapshot.wireLabel}", ` +
         (mcpEndpoint ? `editor tools mounted on ${result.presetMounts.length} preset(s)` : 'editor tools not mounted (no control channel)'),
     )
     // A module namespace object is frozen, so the row count travels beside it

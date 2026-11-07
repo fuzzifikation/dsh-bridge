@@ -28,6 +28,25 @@ Request: reflect the active session in the URL (query parameter is enough — `<
 
 Current bridge workaround: one chromeless panel per desired view — each a full GUI over the session-multiplexing bus, with its own in-app session selection. Good enough for two or three parallel chats; it is not a substitute for real links.
 
+## 6. Any patch content at boot permanently breaks live profile reload: every plugin toggle then fails
+
+Version observed: dsh 0.2.2-rc.1 (latest published), Windows, plain `dsh --profile <p> --no-open` boot, standard `--from-default-profile web` template.
+
+Reproduce (no bridge, no custom bundles, no `--patch`):
+
+1. `DSH_HOME=<fresh temp dir>`; `dsh --profile p --from-default-profile web --dump-config` (creates the stock web profile; its `cordis.patch.yml` is the empty scaffold `[]`).
+2. `dsh --profile p --no-open --port 0`; open the announced URL, log in with the token.
+3. Open the Plugins page and toggle any experimental bundle, or call the same RPC directly: `POST /api/pluginManager/setBundleEnabled` with `{"args":{"name":"@deepseek-ai/dsh-experimental-session-search","enabled":true}}`.
+4. Response: `"application":"failed","error":{"code":"operation-error","diagnostic":"dsh: profile reload requires the root Include entry"}}`. The GUI shows the toast "Could not enable: dsh: profile reload requires the root Include entry".
+
+The write half of the toggle works: `dsh.profile.bundles` in the profile's `package.json` (or the disable row in `cordis.patch.yml`) is updated and takes effect on the next boot. Only the live reload fails, and it fails for the whole life of the process: every later toggle in that window fails the same way, so after ONE toggle plus one restart the profile is permanently un-toggleable without restarting between every two clicks. Because the profile's own patch scaffold is what makes the next boot poisoned, the plugin system consumes its own supply: a profile that has ever been toggled boots reload-broken from then on.
+
+What we verified by bisection across three temp homes and five boots: the failure is already present on the untouched web template (step 3 fails on the FIRST toggle of the FIRST boot); a `--patch <file>` boot flag fails identically even when the file contains only `[]`; a profile patch file containing any row fails; bundle layers shipped via `dsh.bundle.patch` fail the same. One first-boot run ever applied cleanly (`application:"applied"`), and we could not stabilize the difference; every other boot of every profile shape failed. Reading `dsh-app-boot`: `mountRootInclude` records the root include via `bootstrapIncludes.set(ctx, entry)`, and the recorded entry (or its id) is missing whenever the include was created with a `patches` config, which is exactly what `prepareProfileEntries` produces from any non-empty patch set; `recomposeProfile` then throws "profile reload requires the root Include entry" at every reload.
+
+Expected: live profile reload keeps working when the profile has patch content, since patch content is the normal state of any profile whose plugins have been toggled at all. Requested: record the root include regardless of the patches config (or otherwise make `recomposeProfile` find it), plus a regression test that toggles twice across a restart.
+
+Bridge-side posture (none of this fixes the bug, all of it reduces blast radius): the bridge stopped booting with `--patch` and now writes its generated rows into the profile's own patch layer between sentinel comments (same precedence, one less poison source); it watches for the manager's writes to `cordis.patch.yml`/`package.json` while the harness runs and offers a draining restart, which is the path that actually converges. Users of the plain CLI should be told, once confirmed, to expect toggle persistence-on-restart.
+
 ---
 
 # VS Code (microsoft/vscode), DRAFT, not filed: pending owner go

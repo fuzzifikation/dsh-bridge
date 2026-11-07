@@ -25,7 +25,7 @@ import { registerDefaultWorkspace } from '../out/bridge/workspace.js'
 import { ControlServer } from '../out/bridge/control-server.js'
 import { EmbedProxy } from '../out/bridge/embed-proxy.js'
 import { connect as netConnect } from 'node:net'
-import { buildOverlay } from '../shared/overlay.mjs'
+import { buildOverlay, mergePatchLayer, PATCH_LAYER_START, PATCH_LAYER_END } from '../shared/overlay.mjs'
 import * as plugin from '../plugin/snapshot.js'
 
 let dir = ''
@@ -269,8 +269,7 @@ describe('pid file: one shared harness, no murdered strangers', () => {
       const supervisor = new Supervisor({
         binPath: 'unused',
         dshHome: dir,
-        profile: 'vllmc',
-        overlayPath: p.overlay,
+        profile: 'vllmc',
         pidFile: p.pid,
         activeDir: p.active,
         dshVersion: 'x',
@@ -750,13 +749,28 @@ describe('overlay: editor tools mount as an MCP preset child', () => {
     expect(yml).not.toContain('dsh-mcp-client')
   })
 
-  it('never double-mounts the same preset child', () => {
+  it('restates and refreshes the mount on a patch-layer round trip', () => {
+    // The generated rows live in the profile now, so every later dump
+    // already carries the previous mount. Restating-and-skipping (the old
+    // behavior) would delete the mount from the regenerated layer: the
+    // editor tools would silently vanish on prepare number two. The row is
+    // restated instead, and a rotated endpoint REPLACES the stale child
+    // instead of double-mounting next to it.
     const once = buildOverlay(dump, { model: 'm-1', mcpEndpoint: endpoint }).yml
-    const twice = buildOverlay(once, { model: 'm-1', mcpEndpoint: endpoint }).yml
-    // The composed dump already carries the mount, so the overlay restates
-    // nothing: no preset row at all, and no spliced child anywhere.
-    expect(twice).not.toMatch(/- id: preset-/)
-    expect(twice).not.toContain('vllmc-editor-mcp')
+    const twice = buildOverlay(once, { model: 'm-1', mcpEndpoint: { url: 'http://127.0.0.1:7777', token: 'tok-rotated' } }).yml
+    expect((twice.match(/- id: vllmc-editor-mcp/g) || []).length).toBe(3)
+    expect(twice).toContain('url: http://127.0.0.1:7777/mcp')
+    expect(twice).toContain('Bearer tok-rotated')
+    expect(twice).not.toContain('5599')
+    expect(twice).not.toContain('tok-123')
+    // siblings survive the strip: their config travels with them
+    expect(twice).toContain('readOnly: false')
+    expect(twice).toContain("name: '@deepseek-ai/dsh-persona'")
+    expect(twice).toContain('thinkingLevel: high')
+    // three prepares in a row stay a fixed point for the mount's siblings
+    const thrice = buildOverlay(twice, { model: 'm-1', mcpEndpoint: { url: 'http://127.0.0.1:7777', token: 'tok-rotated' } }).yml
+    expect((thrice.match(/- id: vllmc-editor-mcp/g) || []).length).toBe(3)
+    expect(thrice).toContain('readOnly: false')
   })
 
   it('skips absent preset rows with a warning instead of failing the boot', () => {
@@ -1132,8 +1146,7 @@ describe('supervisor lifecycle around window close', () => {
     return new Supervisor({
       binPath: join(dir, 'fake-launcher.js'),
       dshHome: dir,
-      profile: 'vllmc',
-      overlayPath: join(dir, 'overlay.yml'),
+      profile: 'vllmc',
       pidFile: join(dir, 'dsh.pid'),
       activeDir: join(dir, 'active'),
       dshVersion: 'test',
@@ -1155,6 +1168,85 @@ describe('supervisor lifecycle around window close', () => {
     expect(swept.length).toBe(2)
   })
 
+  it('boots without --patch: the patched root include would poison every plugin toggle', async () => {
+    // Upstream dsh-app-boot: an include created with a patches config is
+    // never recorded as the root Include entry, so every live profile reload
+    // (every plugin toggle) afterwards fails with "profile reload requires
+    // the root Include entry". The generated rows reach the harness through
+    // the profile's own patch layer instead, so the boot flag is gone.
+    const argvFile = join(dir, 'argv.txt')
+    writeFileSync(
+      join(dir, 'argv-launcher.js'),
+      "require('node:fs').writeFileSync(process.env.DSH_BRIDGE_ARGV_OUT, process.argv.slice(2).join('\\n'))\n" +
+        "console.log('dsh web: http://127.0.0.1:59998/?token=fake')\nsetInterval(() => {}, 1000)\n",
+    )
+    const supervisor = fakeSupervisor({
+      binPath: join(dir, 'argv-launcher.js'),
+      sweep: () => {},
+      env: { DSH_BRIDGE_ARGV_OUT: argvFile },
+    })
+    await supervisor.start()
+    const args = readFileSync(argvFile, 'utf8').split('\n')
+    expect(args).toEqual(['--profile', 'vllmc', '--no-open', '--port', '0'])
+    expect(args).not.toContain('--patch')
+    await supervisor.stop()
+  })
+
+  it('announces a plugin-toggle write to the profile but never its own regeneration', async () => {
+    // The plugin manager persists a toggle but cannot hot-apply it
+    // (docs/upstream-issues.md); the spawning window watches for that write
+    // and offers the restart that converges, while the bridge's own
+    // patch-layer regeneration stays silent.
+    writeFileSync(
+      join(dir, 'watch-launcher.js'),
+      "console.log('dsh web: http://127.0.0.1:59997/?token=fake')\nsetInterval(() => {}, 1000)\n",
+    )
+    const profileDir = join(dir, 'profile')
+    mkdirSync(profileDir, { recursive: true })
+    const patchPath = join(profileDir, 'cordis.patch.yml')
+    writeFileSync(patchPath, '[]\n')
+    const edits = []
+    const supervisor = fakeSupervisor({
+      binPath: join(dir, 'watch-launcher.js'),
+      sweep: () => {},
+      profileDir,
+      onProfileEdit: (file) => edits.push(file),
+    })
+    await supervisor.start()
+    // A write we claimed as our own: not an event.
+    supervisor.recordOwnProfileWrite(patchPath, '# ours\n')
+    writeFileSync(patchPath, '# ours\n')
+    // A write from anywhere else: one event, named by the file.
+    writeFileSync(patchPath, "[]\n- id: '@some/bundle'\n  disabled: true\n")
+    const deadline = Date.now() + 8000
+    while (edits.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100))
+    await supervisor.stop()
+    expect(edits).toEqual(['cordis.patch.yml'])
+  })
+
+  it('a fresh spawn clears the active-request ghosts the dead harness left behind', async () => {
+    // Records carry the writer's pid in the file name; the writer is gone,
+    // so the "N requests running" pill and the next drain are haunting a
+    // corpse (observed after two mid-turn reloads: ghosts from 20:25 and
+    // 14:43 counted against a harness that had just started).
+    writeFileSync(
+      join(dir, 'ghost-launcher.js'),
+      "console.log('dsh web: http://127.0.0.1:59995/?token=fake')\nsetInterval(() => {}, 1000)\n",
+    )
+    const activeDir = join(dir, 'ghost-active')
+    mkdirSync(activeDir, { recursive: true })
+    writeFileSync(join(activeDir, '1794062613853-36696-eeade0fc.json'), '{}')
+    writeFileSync(join(activeDir, '1794079552160-32632-11a7dfc8.json'), '{}')
+    const supervisor = fakeSupervisor({
+      binPath: join(dir, 'ghost-launcher.js'),
+      sweep: () => {},
+      activeDir,
+    })
+    await supervisor.start()
+    expect(readdirSync(activeDir)).toEqual([])
+    await supervisor.stop()
+  })
+
   it('closing a borrowing window leaves the borrowed harness, its pid file, and its servers alone', () => {
     const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { windowsHide: true, stdio: 'ignore' })
     const pidFile = join(dir, 'dsh.pid')
@@ -1167,6 +1259,57 @@ describe('supervisor lifecycle around window close', () => {
     expect(readPidRecord(pidFile)?.pid).toBe(holder.pid)
     expect(isProcessAlive(holder.pid)).toBe(true)
     holder.kill()
+  })
+})
+
+describe('profile patch layer merge', () => {
+  // The overlay rows and the plugin manager write the SAME file now. The
+  // merge is the peace treaty: regeneration must be a fixed point over its
+  // own output and must never eat the user's toggles.
+  const scaffold = [
+    '# Your patch layer for this dsh profile, applied after every bundle layer:',
+    '# a top-level YAML array of loader patch entries (id-targeted config',
+    '# overrides, disables, and insert lists; `!!js` expressions allowed).',
+    '[]',
+    '',
+  ].join('\n')
+  const rows = '# GENERATED by the dsh bridge\n- id: agent-default-model\n  config:\n    provider: "vllmc"\n    model: "m-1"\n'
+
+  it('appends the block, keeps the scaffold comments, drops the bare []', () => {
+    const merged = mergePatchLayer(scaffold, rows)
+    expect(merged).toContain(PATCH_LAYER_START)
+    expect(merged).toContain(PATCH_LAYER_END)
+    expect(merged).toContain('!!js')
+    expect(merged).not.toMatch(/^\[\]/m)
+    expect(merged.indexOf('agent-default-model')).toBeGreaterThan(merged.indexOf(PATCH_LAYER_START))
+  })
+
+  it('is a fixed point: regenerating over its own output changes nothing', () => {
+    const once = mergePatchLayer(scaffold, rows)
+    expect(mergePatchLayer(once, rows)).toBe(once)
+  })
+
+  it('keeps plugin-manager rows and keeps them outside the block', () => {
+    const toggled = mergePatchLayer(scaffold, rows)
+    const withUser = `${toggled}\n- id: '@some/bundle'\n  disabled: true\n`
+    const again = mergePatchLayer(withUser, rows)
+    expect(again).toContain("@some/bundle")
+    expect((again.match(/>>> dsh-bridge generated layer/g) || []).length).toBe(1)
+    expect(again.indexOf("@some/bundle")).toBeLessThan(again.indexOf(PATCH_LAYER_START))
+  })
+
+  it('swallows a dangling block whose end marker was edited away', () => {
+    const broken = mergePatchLayer(scaffold, rows).replace(PATCH_LAYER_END, '# oops, gone')
+    const fixed = mergePatchLayer(broken, '# GENERATED\n- id: agent-default-model\n  config:\n    provider: "vllmc"\n    model: "m-2"\n')
+    expect(fixed).toContain('model: "m-2"')
+    expect(fixed).not.toContain('m-1')
+    expect(fixed).not.toContain('oops, gone')
+    expect((fixed.match(/>>> dsh-bridge generated layer/g) || []).length).toBe(1)
+  })
+
+  it('restores [] when the generated rows are empty', () => {
+    expect(mergePatchLayer('', '').trim()).toBe('[]')
+    expect(mergePatchLayer(scaffold, '')).toContain('[]')
   })
 })
 
@@ -1339,6 +1482,7 @@ describe('embed proxy (the chromeless-panel door)', () => {
     expect(page).toContain('APP PAGE')
     expect(page).toContain('dshEmbedTitle')
     expect(page).toContain('dshKey')
+    expect(page).toContain('__dsh-key')
     expect(page.indexOf('dshEmbedTitle')).toBeLessThan(page.indexOf('</html>'))
     // Plain passthrough stays byte-identical: no beacon in non-HTML, and
     // not even in HTML that is not the index page.
@@ -1355,6 +1499,16 @@ describe('embed proxy (the chromeless-panel door)', () => {
     const res = await fetch(`${root}/__dsh-title?v=abc&t=${encodeURIComponent('Dsf Query \u2014 DeepSeek Harness')}`)
     expect(res.status).toBe(204)
     expect(titles).toEqual([['abc', 'Dsf Query \u2014 DeepSeek Harness']])
+  })
+
+  it('takes a keyboard chord over the same-origin channel and pre-auth', async () => {
+    harness = await startHarness('A1')
+    const keys = []
+    proxy = new EmbedProxy({ port: 0, log: quiet, onKey: (c) => keys.push(c) })
+    const root = await proxy.listen()
+    const res = await fetch(`${root}/__dsh-key?c=${encodeURIComponent('Ctrl+Shift+P')}`)
+    expect(res.status).toBe(204)
+    expect(keys).toEqual(['Ctrl+Shift+P'])
   })
 
   it('serves 502 while the harness is gone and rides the new one after retarget', async () => {

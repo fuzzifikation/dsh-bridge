@@ -99,6 +99,9 @@ function ensureEmbed(): Promise<string> {
       }
       log().debug?.(`embed title beacon for an unknown view (${view})`) 
     },
+    onKey: (chord) => {
+      void runBridgeKey(chord)
+    },
   })
   embedStart ??= embed.listen().catch((err: Error) => {
     embedStart = undefined
@@ -150,11 +153,22 @@ const KEYBOARD_BRIDGE: Record<string, string> = {
   'Cmd+W': 'workbench.action.closeActiveEditor',
 }
 
+/** Two roads report one press (postMessage and the proxy fetch); the
+ * whitelist executes it once. */
+const lastChordExecuted = new Map<string, number>()
+
 async function runBridgeKey(chord: string): Promise<void> {
   if (!vscode.workspace.getConfiguration('dsh-bridge').get<boolean>('keyboardBridge', true)) return
   const cmd = KEYBOARD_BRIDGE[chord]
   if (!cmd) return
-  log().debug?.(`keyboard bridge: ${chord} -> ${cmd}`)
+  const now = Date.now()
+  if (now - (lastChordExecuted.get(chord) ?? 0) < 800) return
+  lastChordExecuted.set(chord, now)
+  // Info, not debug: a shortcut press is a user event, and doctrine says a
+  // fragile hop earns a log at its receiving end that survives the default
+  // log level. "Nothing in the log" must mean "nothing arrived", never
+  // "the log was filtered".
+  log().info(`keyboard bridge: ${chord} -> ${cmd}`)
   try {
     await vscode.commands.executeCommand(cmd)
   } catch (err) {
@@ -407,11 +421,37 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     log: logger,
   })
 
-  const bridge = new Bridge({
+  // One plugin-toggle notice at a time; back-to-back toggles all land in
+// the same restart, and a stack of identical cards is noise.
+let profileEditNoticeOpen = false
+const bridge = new Bridge({
     extensionRoot: context.extensionPath,
     extensionVersion: version,
     paths,
     log: logger,
+    onProfileEdit: (file) => {
+      // A plugin-page toggle: the manager persisted the change to the
+      // profile, but this dsh build cannot hot-apply it, and the GUI
+      // toast claims a failure that a restart will actually undo. Say so
+      // plainly and offer the restart that converges.
+      if (profileEditNoticeOpen) return
+      profileEditNoticeOpen = true
+      const adopted = bridge.supervisor.adopted
+      void vscode.window
+        .showInformationMessage(
+          `DeepSeek Harness: ${file} changed on disk. Plugin changes are saved but cannot hot-apply; ` +
+            (adopted
+              ? 'the window that started this harness can restart it.'
+              : 'restart now (in-flight turns are waited for).'),
+          ...(adopted ? [] : ['Restart harness now']),
+        )
+        .then((choice) => {
+          // vscode's Thenable has no finally; dismissal resolves with
+          // undefined and arms the next notice just the same.
+          profileEditNoticeOpen = false
+          if (choice === 'Restart harness now') scheduleRestart('a plugin toggle changed the profile')
+        })
+    },
     dshVersion: () => readBridgeSettings().dshVersion || readBundledPin(),
     registry: () => {
       const registry = readMainRegistry()

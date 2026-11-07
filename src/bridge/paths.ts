@@ -23,6 +23,7 @@ export const HOME_DIR = 'dsh-home'
 
 /** Relative to the `vllmc` directory. */
 export const SNAPSHOT_FILE = 'snapshot.json'
+/** Legacy: superseded by the profile patch layer; removed again on every prepare. */
 export const OVERLAY_FILE = 'overlay.yml'
 export const PID_FILE = 'dsh.pid'
 export const OUTBOX_DIR = 'usage-outbox'

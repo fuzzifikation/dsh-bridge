@@ -59,6 +59,14 @@ export interface EmbedProxyDeps {
    * as a second opinion; either half arriving renames the tab.
    */
   onTitle?: (view: string, title: string) => void
+  /**
+   * The chord twin of the title beacon's back channel: the frame fetches
+   * its unconsumed modifier chord to `/__dsh-key`, and the extension runs
+   * it if it is on the whitelist. Same trust, same fire-and-forget shape,
+   * because the parent.postMessage road has proven unreliable in webviews
+   * and a shortcut may not depend on one hop.
+   */
+  onKey?: (chord: string) => void
 }
 
 /** The login walk hops at most this far before declaring the target unusable. */
@@ -225,6 +233,18 @@ export class EmbedProxy {
       res.end()
       return
     }
+    if ((req.url ?? '').startsWith('/__dsh-key')) {
+      // The chord's own report, shaped exactly like the title's: writes one
+      // string into the extension, reads nothing, so it answers pre-auth and
+      // forwards nothing.
+      const q = new URL(req.url ?? '/', 'http://127.0.0.1')
+      const chord = q.searchParams.get('c') ?? ''
+      this.deps.log.debug?.(`embed key beacon: ${chord}`)
+      if (chord) this.deps.onKey?.(chord)
+      res.writeHead(204)
+      res.end()
+      return
+    }
     const target = this.target
     if (!target) {
       res.writeHead(503, { 'content-type': 'application/json' })
@@ -286,7 +306,7 @@ export class EmbedProxy {
           // to the shell as a normalized chord. VS Code 1.145 removed the old
           // vscode-keydown forwarding protocol, and DOM events cannot escape an
           // iframe, so this injected hop is the only lawful road for chords.
-          const beacon = '<script>(()=>{if(window.top===window)return;const v=new URLSearchParams(location.search).get("dshView")||"";let t="";const s=()=>{const x=document.title;if(x===t)return;t=x;try{parent.postMessage({dshEmbedTitle:x,v:v},"*")}catch(e){}try{fetch("/__dsh-title?v="+encodeURIComponent(v)+"&t="+encodeURIComponent(x))}catch(e){}};s();setInterval(s,1500);document.addEventListener("keydown",(e)=>{if(e.repeat)return;if(!(e.ctrlKey||e.metaKey||e.key==="F1"||e.altKey))return;if(e.key==="Control"||e.key==="Meta"||e.key==="Alt"||e.key==="Shift")return;setTimeout(()=>{if(e.defaultPrevented)return;const n=e.key===","?"Comma":(e.key.length===1?e.key.toUpperCase():e.key);const c=(e.ctrlKey?"Ctrl+":"")+(e.metaKey&&!e.ctrlKey?"Cmd+":"")+(e.altKey?"Alt+":"")+(e.shiftKey&&e.key!=="Shift"?"Shift+":"")+n;try{parent.postMessage({dshKey:c,v:v},"*")}catch(e2){}},0)},true)})()</script>'
+          const beacon = '<script>(()=>{if(window.top===window)return;const v=new URLSearchParams(location.search).get("dshView")||"";let t="";const s=()=>{const x=document.title;if(x===t)return;t=x;try{parent.postMessage({dshEmbedTitle:x,v:v},"*")}catch(e){}try{fetch("/__dsh-title?v="+encodeURIComponent(v)+"&t="+encodeURIComponent(x))}catch(e){}};s();setInterval(s,1500);document.addEventListener("keydown",(e)=>{if(e.repeat)return;if(!(e.ctrlKey||e.metaKey||e.key==="F1"||e.altKey))return;if(e.key==="Control"||e.key==="Meta"||e.key==="Alt"||e.key==="Shift")return;setTimeout(()=>{if(e.defaultPrevented)return;const n=e.key===","?"Comma":(e.key.length===1?e.key.toUpperCase():e.key);const c=(e.ctrlKey?"Ctrl+":"")+(e.metaKey&&!e.ctrlKey?"Cmd+":"")+(e.altKey?"Alt+":"")+(e.shiftKey&&e.key!=="Shift"?"Shift+":"")+n;try{parent.postMessage({dshKey:c,v:v},"*")}catch(e2){}try{fetch("/__dsh-key?c="+encodeURIComponent(c))}catch(e3){}},0)},true)})()</script>'
           const at = body.lastIndexOf('</body>')
           body = at >= 0 ? body.slice(0, at) + beacon + body.slice(at) : body + beacon
           out['content-length'] = String(Buffer.byteLength(body))

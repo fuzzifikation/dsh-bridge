@@ -22,6 +22,10 @@ export interface OverlayModule {
     provider: string
     model: string
   }
+  stripMcpChildLines(cfgLines: string[]): string[]
+  mergePatchLayer(existing: string, overlayYml: string): string
+  PATCH_LAYER_START: string
+  PATCH_LAYER_END: string
   PRIVACY_ROWS: readonly string[]
   DEPENDENT_ROWS: readonly string[]
 }

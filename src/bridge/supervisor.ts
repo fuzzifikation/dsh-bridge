@@ -12,7 +12,7 @@
  * the reap path testable with a real live process instead of a mock.
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, watch, writeFileSync, type FSWatcher } from 'node:fs'
 import path from 'node:path'
 import { drainActiveRequests } from './ingest.js'
 
@@ -261,8 +261,7 @@ export function redactUrl(url: string): string {
 export interface SupervisorOptions {
   binPath: string
   dshHome: string
-  profile: string
-  overlayPath: string
+  profile: string
   pidFile: string
   activeDir: string
   /**
@@ -279,6 +278,17 @@ export interface SupervisorOptions {
   env?: Record<string, string> | (() => Record<string, string>)
   /** Process sweep for this home; injectable so tests never touch the process table. */
   sweep?: (dshHome: string) => void | Promise<void>
+  /**
+   * The profile directory to watch while the harness is live, and the
+   * callback fired when one of its plugin-toggle files changes on disk from
+   * somewhere else. The plugin manager persists toggles to the profile but
+   * cannot hot-apply them (docs/upstream-issues.md), so the manager's write
+   * is the moment the user deserves to hear "restart to apply". Only armed
+   * by the window that SPAWNS the harness: a borrowing window neither owns
+   * the restart nor the restart's own patch-layer writes.
+   */
+  profileDir?: string
+  onProfileEdit?: (file: string) => void
 }
 
 export class Supervisor {
@@ -287,6 +297,15 @@ export class Supervisor {
   private stopping = false
   private adoptedPid: number | undefined
   private tail = ''
+  private profileWatcher: FSWatcher | undefined
+  private profileEditTimers = new Map<string, NodeJS.Timeout>()
+  /**
+   * Exact contents of the last profile files WE wrote, by basename. The
+   * bridge regenerates the patch layer on every prepare, and the watcher
+   * must not present our own regeneration as a change the user should
+   * restart for; a byte-equal file is not an event.
+   */
+  private ownProfileWrites = new Map<string, string>()
 
   constructor(private readonly opts: SupervisorOptions) {}
 
@@ -331,6 +350,60 @@ export class Supervisor {
     this.url = undefined
   }
 
+  /** Claim a profile-file write as our own, so the watcher stays silent for it. */
+  recordOwnProfileWrite(file: string, content: string): void {
+    this.ownProfileWrites.set(path.basename(file), content)
+  }
+
+  /**
+   * The two files a plugin toggle rewrites: enablement lands in the
+   * manifest's bundle list, disables and overrides in the patch layer
+   * (coexisting with the generated block, which the manager preserves
+   * comment-for-comment).
+   */
+  private static readonly WATCHED_PROFILE_FILES = new Set(['cordis.patch.yml', 'package.json'])
+
+  private armProfileWatcher(): void {
+    const o = this.opts
+    if (!o.profileDir || !o.onProfileEdit) return
+    const dir = o.profileDir
+    try {
+      this.profileWatcher = watch(dir, (_event, name) => {
+        if (typeof name !== 'string' || !Supervisor.WATCHED_PROFILE_FILES.has(name)) return
+        // Windows delivers each rename as several events; one settle window
+        // per file, and the byte compare decides whether it was anyone's
+        // business at all.
+        const pending = this.profileEditTimers.get(name)
+        if (pending) clearTimeout(pending)
+        const timer = setTimeout(() => {
+          this.profileEditTimers.delete(name)
+          let content: string
+          try {
+            content = readFileSync(path.join(dir, name), 'utf8')
+          } catch {
+            return
+          }
+          if (this.ownProfileWrites.get(name) === content) return
+          this.ownProfileWrites.set(name, content)
+          o.onProfileEdit?.(name)
+        }, 600)
+        timer.unref?.()
+        this.profileEditTimers.set(name, timer)
+      })
+      this.profileWatcher.unref?.()
+    } catch (err) {
+      // A missing watch only costs the courtesy notice, never the harness.
+      o.log.warn(`profile edit watch unavailable: ${String(err)}`)
+    }
+  }
+
+  private closeProfileWatcher(): void {
+    this.profileWatcher?.close()
+    this.profileWatcher = undefined
+    for (const timer of this.profileEditTimers.values()) clearTimeout(timer)
+    this.profileEditTimers.clear()
+  }
+
   /**
    * The launcher path is only known once the runtime install has resolved it,
    * which can happen again after an upgrade, so it stays mutable rather than
@@ -361,9 +434,37 @@ export class Supervisor {
     // the suggestion that it may behave like an editor helper process.
     const env: Record<string, string | undefined> = { ...process.env, DSH_HOME: o.dshHome, ...(typeof o.env === 'function' ? o.env() : o.env) }
     delete env.ELECTRON_RUN_AS_NODE
+    // The active-request ledger survives the process that wrote it. A spawn
+    // happens only when no harness lives, so every record still in the
+    // directory belongs to a process that died mid-turn (reload, crash,
+    // kill): ghosts that haunt the pill with phantom "running requests" and
+    // make the next drain wait on dead pids forever. A fresh start starts
+    // with an honest ledger.
+    try {
+      const ghosts = readdirSync(o.activeDir)
+      if (ghosts.length > 0) {
+        for (const ghost of ghosts) {
+          try {
+            unlinkSync(path.join(o.activeDir, ghost))
+          } catch {
+            /* vanished mid-delete or not a file: either way, not a live request */
+          }
+        }
+        o.log.info(`cleared ${ghosts.length} stale active-request record(s) left by a dead harness`)
+      }
+    } catch {
+      /* no active directory yet: nothing to inherit */
+    }
+    // No --patch here, ever: upstream, ANY patch content at boot (this flag,
+    // rows in the profile patch layer, even a bundle's own patch) leaves the
+    // profile's root Include entry unregistered for the life of the process,
+    // and every plugin toggle then dies with "profile reload requires the
+    // root Include entry" (docs/upstream-issues.md entry 6). Dropping the
+    // flag is one poison source less; the generated rows reach the harness
+    // through the profile's own patch layer instead, written by prepare.
     const child = spawn(
       node,
-      [o.binPath, '--profile', o.profile, '--patch', o.overlayPath, '--no-open', '--port', '0'],
+      [o.binPath, '--profile', o.profile, '--no-open', '--port', '0'],
       {
         cwd: o.dshHome,
         env: env as NodeJS.ProcessEnv,
@@ -460,9 +561,13 @@ export class Supervisor {
     // Second half of the record: the URL only exists once dsh announces it, and
     // it is what lets the next window adopt this harness instead of replacing it.
     writePidRecord(o.pidFile, { pid: child.pid, startedAt: new Date().toISOString(), profile: o.profile, dshVersion, url })
+    // Live now: plugin toggles from here on persist without applying, so the
+    // owner window watches for them until this process is gone.
+    this.armProfileWatcher()
     // A process that dies right after announcing itself must be reported, not
     // shown as a healthy status bar.
     void exited.then((info) => {
+      this.closeProfileWatcher()
       if (this.stopping || info.code === 0) return
       // Another window's Stop clears (or replaces) the pid record while our
       // child dies: that exit is deliberate, and screaming "exited on its
