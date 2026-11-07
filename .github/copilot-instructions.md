@@ -7,8 +7,9 @@ Companion to [vLLM-Copilot](https://github.com/fuzzifikation/vLLM-Copilot). Two 
 
 ## Law and plans
 
-- **Design law** (architecture mermaid, six owner rulings, adapter contract, verification gates 1-5, spike-verified dsh facts): [docs/dsh-bridge-plan.md](../docs/dsh-bridge-plan.md). Read it before designing anything; it is the repo's own law since 2026-10-08.
-- **Executable plan and current status**: [docs/plan.md](../docs/plan.md). Work from it; update its status line as units move.
+- **Design law** (architecture mermaid, owner rulings, adapter contract, verification gates 1-5, spike-verified dsh facts, harness surface laws added 2026-11-07): [docs/dsh-bridge-plan.md](../docs/dsh-bridge-plan.md). Read it before designing anything; it is the repo's own law since 2026-10-08.
+- **Surface spec**: [docs/ui-ux.md](../docs/ui-ux.md). Binding description of the chromeless panel era (pill, tabs, titles, keyboard, settings, feel-invariants). Where code and spec disagree, one of them is a bug; the spec assumes VS Code 1.145.
+- **Decision journal**: [docs/plan.md](../docs/plan.md). Dated entries with reasoning and rejected alternatives. It is history, not current truth: supersede entries with dated pointers, never by rewriting. New decisions get new dated entries in house style.
 
 ## Standing rulings (do not re-propose around them)
 
