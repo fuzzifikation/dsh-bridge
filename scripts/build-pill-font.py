@@ -1,148 +1,128 @@
 #!/usr/bin/env python3
 """
-Build the two-glyph pill font used by `contributes.icons`.
+Build everything the whale ships as: the pill font AND the Marketplace icon,
+both traced from one vector source, docs/images/icon_whale.svg.
 
-Output: resources/dsh-bridge-icons.woff2
-  'dsh-whale'      at U+E001  harness running: the Marketplace whale, spouting
-  'dsh-whale-off'  at U+E002  harness stopped: same whale, spray gone; the
-                              shipped art already rests on a waterline bar
+Outputs:
+  resources/dsh-bridge-icons.woff2  (`contributes.icons`, consumed as
+      `$(dsh-bridge-whale)` in status-bar text; mechanism and font recipe
+      copied from the proven companion, vLLM-Copilot scripts/build-icon-font.py:
+      fontTools, em 1000, cmap in the private-use area, woff2 flavor)
+        'dsh-whale'      U+E001  harness running: the whale, spouting
+        'dsh-whale-off'  U+E002  harness stopped: spray gone; a whale that
+                                 stopped spouting IS the resting state
+  docs/images/icon.png            1024px RGBA, the same artwork in full color
 
-Mechanism copied from the proven companion (vLLM-Copilot scripts/
-build-icon-font.py): a TrueType built by fontTools, flavor woff2, glyphs in
-the private-use area, consumed as `$(dsh-bridge-whale)` in status-bar text.
-Same contribution point, same rendering path, same 1.140 proof.
+Why the icon is regenerated too: one artwork, one source. Pill and gallery
+are both rasterizations of the same paths, so they cannot drift apart.
 
-The outlines are traced, not hand-drawn: docs/images/icon.png is decoded in
-pure stdlib (RGBA, 8-bit, non-interlaced), thresholded to a mask, split into
-connected components (body vs spout jets), and its boundary walked as directed
-unit edges; loops are classified outer/hole by nesting depth, simplified with
-Ramer-Douglas-Peucker, then forced to TrueType winding (y-up: outer
-clockwise, counter counter-clockwise). Tracing the SHIPPED marketplace icon
-means pill and gallery can never drift apart.
+The monochrome silhouette is the UNION of the inked paths, and the union is
+taken at raster resolution, not in vector space: vector polygon booleans are
+their own research field, and at the viewBox's own 1024 units per pixel this
+loses nothing a 16px pill can show. Per-path fill uses the SVG default
+nonzero rule with all subpaths of a path sharing one winding counter, which
+is load-bearing: the eye and the spray's negative spaces are reversed
+subpaths and would silently fill solid under the obvious per-subpath OR
+(verified: path 0 group-nonzero 204652 = body 206110 - eye 1458).
 
-Run:  python scripts/build-pill-font.py
+Run:  python scripts/build-pill-font.py   (npm run icons:build)
 Requires: fonttools (+ brotli for woff2)
-Previews: temp/pill-preview.png (rendered from the traced contours, incl. a
-16px strip, because a glyph unreadable at pill size is not a glyph).
+Previews: temp/pill-preview.png (traced contours at 200px and at real pill
+size, enlarged; a glyph unreadable at pill size is not a pill glyph).
 """
 
 import os
-import struct
-import zlib
 
 from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 
+import svggeom
+
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
-SOURCE = os.path.join(ROOT, 'docs', 'images', 'icon.png')
+SVG = os.path.join(ROOT, 'docs', 'images', 'icon_whale.svg')
+ICON_PNG = os.path.join(ROOT, 'docs', 'images', 'icon.png')
+FONT_OUT = os.path.join(ROOT, 'resources', 'dsh-bridge-icons.woff2')
+RASTER = 1024  # the SVG viewBox is 0 0 1024 1024: one raster px per unit
+ICON_SIZE = 1024  # square output px for the Marketplace icon
 EM = 1000
 EM_TARGET = 840  # glyph longest side inside the em, leaves side bearings
-ALPHA_MIN = 24  # the spout paint is translucent; 128 silently eats the jets
-DP_TOLERANCE = 0.9  # px on the 256 source, applied only to bulky loops
-SIMPLIFY_MIN = 200  # points below which a loop stays pixel-exact (see simplify_loop)
-MIN_COMPONENT = 16  # antialias specks in the source are not glyph material
-
-# ---------------------------------------------------------------------------
-# PNG decode (8-bit RGBA, non-interlaced): the shipped icon, stdlib only.
-# ---------------------------------------------------------------------------
-
-
-def read_png_rgba(path):
-    with open(path, 'rb') as handle:
-        data = handle.read()
-    if data[:8] != b'\x89PNG\r\n\x1a\n':
-        raise SystemExit(f'{path}: not a PNG')
-    pos = 8
-    width = height = 0
-    idat = bytearray()
-    while pos < len(data):
-        (length,) = struct.unpack('>I', data[pos:pos + 4])
-        kind = data[pos + 4:pos + 8]
-        chunk = data[pos + 8:pos + 8 + length]
-        if kind == b'IHDR':
-            width, height, depth, color, compression, filter_mode, interlace = struct.unpack('>IIBBBBB', chunk)
-            if depth != 8 or color != 6 or interlace != 0:
-                raise SystemExit(f'{path}: need 8-bit RGBA non-interlaced, got depth={depth} color={color} interlace={interlace}')
-        elif kind == b'IDAT':
-            idat += chunk
-        elif kind == b'IEND':
-            break
-        pos += 12 + length
-    raw = zlib.decompress(bytes(idat))
-    stride = width * 4
-    out = bytearray(height * stride)
-
-    def paeth(a, b, c):
-        p = a + b - c
-        pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
-        return a if pa <= pb and pa <= pc else (b if pb <= pc else c)
-
-    ipos = 0
-    for y in range(height):
-        ftype = raw[ipos]
-        ipos += 1
-        line = bytearray(raw[ipos:ipos + stride])
-        ipos += stride
-        prev = out[(y - 1) * stride:y * stride] if y else bytes(stride)
-        if ftype == 1:
-            for x in range(4, stride):
-                line[x] = (line[x] + line[x - 4]) & 0xFF
-        elif ftype == 2:
-            for x in range(stride):
-                line[x] = (line[x] + prev[x]) & 0xFF
-        elif ftype == 3:
-            for x in range(stride):
-                a = line[x - 4] if x >= 4 else 0
-                line[x] = (line[x] + ((a + prev[x]) >> 1)) & 0xFF
-        elif ftype == 4:
-            for x in range(stride):
-                a = line[x - 4] if x >= 4 else 0
-                c = prev[x - 4] if x >= 4 else 0
-                line[x] = (line[x] + paeth(a, prev[x], c)) & 0xFF
-        elif ftype != 0:
-            raise SystemExit(f'{path}: unknown filter {ftype}')
-        out[y * stride:(y + 1) * stride] = line
-    return width, height, out
+DP_TOLERANCE = 2.0  # raster units (1024 scale); 0.5 px on a 256 tile
+SIMPLIFY_MIN = 48  # loops under this many points stay pixel-exact
+MIN_COMPONENT = 200  # antialias specks are not glyph material at 1024
 
 
 # ---------------------------------------------------------------------------
-# Mask, components, boundary walk.
+# Mask algebra (bytearray row masks).
 # ---------------------------------------------------------------------------
 
 
-def alpha_mask(width, height, rgba):
-    return [[rgba[(y * width + x) * 4 + 3] >= ALPHA_MIN for x in range(width)] for y in range(height)]
+def or_masks(masks, width, height):
+    out = [bytearray(width) for _ in range(height)]
+    for mask in masks:
+        for y in range(height):
+            row = out[y]
+            src = mask[y]
+            for x in range(width):
+                if src[x]:
+                    row[x] = 1
+    return out
+
+
+def mask_from_component(comp, width, height):
+    out = [bytearray(width) for _ in range(height)]
+    for x, y in comp:
+        out[y][x] = 1
+    return out
 
 
 def components(mask, width, height):
-    seen = [[False] * width for _ in range(height)]
+    seen = [bytearray(width) for _ in range(height)]
     comps = []
     for y in range(height):
         for x in range(width):
             if not mask[y][x] or seen[y][x]:
                 continue
             stack = [(x, y)]
-            seen[y][x] = True
+            seen[y][x] = 1
             comp = []
             while stack:
                 cx, cy = stack.pop()
                 comp.append((cx, cy))
                 for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
                     if 0 <= nx < width and 0 <= ny < height and mask[ny][nx] and not seen[ny][nx]:
-                        seen[ny][nx] = True
+                        seen[ny][nx] = 1
                         stack.append((nx, ny))
             comps.append(comp)
     comps.sort(key=len, reverse=True)
     return comps
 
 
+def drop_small_components(mask, width, height, min_size):
+    """Zero out components under min_size, in place, keeping holes intact.
+
+    Rebuilding a mask FROM components would fill the eye and the spray gaps
+    solid, so components are only used to find pixels to delete.
+    """
+    small = 0
+    for comp in components(mask, width, height):
+        if len(comp) < min_size:
+            small += 1
+            for x, y in comp:
+                mask[y][x] = 0
+    return small
+
+
+# ---------------------------------------------------------------------------
+# Trace: boundary walk, nesting, simplification.
+# ---------------------------------------------------------------------------
+
+
 def boundary_loops(mask, width, height):
     """Walk inside/outside unit edges into closed loops (corner coords).
 
-    Convention: for every inside pixel, each side facing an outside pixel
-    contributes one directed edge (fixed orientation per side, see below);
-    at each corner the walk takes the sharpest clockwise turn, which keeps
-    every loop consistently oriented and separates saddle crossings.
+    For every inside pixel, each side facing an outside pixel contributes one
+    directed edge; at each corner the walk takes the sharpest clockwise turn,
+    which keeps every loop consistently oriented and separates saddle crossings.
     """
     edges = {}  # corner -> list of other endpoints (directed out)
 
@@ -183,7 +163,7 @@ def boundary_loops(mask, width, height):
                 if not cands:
                     raise SystemExit('boundary walk stalled: non-manifold edge set')
                 dx1, dy1 = b[0] - a[0], b[1] - a[1]
-                # sharpest clockwise turn in y-down coords == largest cross, then dot
+
                 def score(c):
                     dx2, dy2 = c[0] - b[0], c[1] - b[1]
                     return (dx1 * dy2 - dy1 * dx2, dx1 * dx2 + dy1 * dy2)
@@ -216,19 +196,14 @@ def classify(loops):
     return out
 
 
-# ---------------------------------------------------------------------------
-# Ramer-Douglas-Peucker on closed loops.
-# ---------------------------------------------------------------------------
-
-
 def _perp(pt, a, b):
-        ax, ay = a
-        bx, by = b
-        dx, dy = bx - ax, by - ay
-        if dx == dy == 0:
-            return ((pt[0] - ax) ** 2 + (pt[1] - ay) ** 2) ** 0.5
-        num = abs(dy * pt[0] - dx * pt[1] + bx * ay - by * ax)
-        return num / (dx * dx + dy * dy) ** 0.5
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    if dx == dy == 0:
+        return ((pt[0] - ax) ** 2 + (pt[1] - ay) ** 2) ** 0.5
+    num = abs(dy * pt[0] - dx * pt[1] + bx * ay - by * ax)
+    return num / (dx * dx + dy * dy) ** 0.5
 
 
 def rdp(points, eps):
@@ -253,20 +228,21 @@ def rdp(points, eps):
     return [p for p, k in zip(points, keep) if k]
 
 
-def simplify_loop(loop, eps):
-    """Ramer-Douglas-Peucker for BULKY loops only, decided by the caller.
+def trace_mask(mask, width, height):
+    """Pixel mask -> [(loop, is_outer)] with bulky loops simplified.
 
-    Thin translucent loops (mouth slit, the lens between the jet arcs) DO
-    get deformed by their own chords at any sane eps: measured, DP at 0.9
-    flips even-odd parity over the head and eats the snout. Big outer loops
-    simplify cleanly (verified render). Small loops stay pixel-exact; the
-    font budget does not care.
+    Douglas-Peucker runs only on loops above SIMPLIFY_MIN points: thin loops
+    (the eye, the spray gaps) get deformed past their neighbors by their own
+    chords, the exact failure the PNG-era trace measured when a simplified
+    jet chord reached over the head and even-odd parity ate the snout.
     """
-    return rdp(loop, eps)
+    classified = classify(boundary_loops(mask, width, height))
+    return [(rdp(loop, DP_TOLERANCE) if len(loop) > SIMPLIFY_MIN else list(loop), outer)
+            for loop, outer in classified]
 
 
 # ---------------------------------------------------------------------------
-# Font.
+# Font placement and drawing.
 # ---------------------------------------------------------------------------
 
 
@@ -294,8 +270,7 @@ def contours_to_em(loops, is_outers, to_em):
     """Pixel loops (y-down) -> em-unit polygon contours (y-up), outer CW.
 
     `to_em` comes from placement() over the RUNNING glyph, so switching pill
-    state never resizes or shifts the whale.
-    Returns (contours, diagnostics).
+    state never resizes or shifts the whale. Returns (contours, diagnostics).
     """
     contours = []
     for loop, outer in zip(loops, is_outers):
@@ -304,7 +279,6 @@ def contours_to_em(loops, is_outers, to_em):
         # TrueType y-up: outer must be clockwise (negative), counter positive.
         if (area > 0) == outer:
             poly.reverse()
-            area = -area
         contours.append(poly)
     return contours, (len(loops), sum(len(c) for c in contours))
 
@@ -318,42 +292,101 @@ def draw_glyph(pen, contours):
 
 
 # ---------------------------------------------------------------------------
-# Preview rendering from the traced contours only (what the font will hold).
+# PNG writing (stdlib): gray preview, RGBA icon.
 # ---------------------------------------------------------------------------
 
 
+def _png_chunk(kind, data):
+    import struct
+    import zlib
+    body = kind + data
+    return struct.pack('>I', len(data)) + body + struct.pack('>I', zlib.crc32(body) & 0xFFFFFFFF)
+
+
 def png_write_gray(path, width, height, pixels):
+    import struct
+    import zlib
     raw = b''.join(b'\x00' + bytes(pixels[y * width:(y + 1) * width]) for y in range(height))
-
-    def chunk(kind, data):
-        body = kind + data
-        return struct.pack('>I', len(data)) + body + struct.pack('>I', zlib.crc32(body) & 0xFFFFFFFF)
-
     png = b'\x89PNG\r\n\x1a\n'
-    png += chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 0, 0, 0, 0))
-    png += chunk(b'IDAT', zlib.compress(raw, 9))
-    png += chunk(b'IEND', b'')
+    png += _png_chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 0, 0, 0, 0))
+    png += _png_chunk(b'IDAT', zlib.compress(raw, 9))
+    png += _png_chunk(b'IEND', b'')
     with open(path, 'wb') as handle:
         handle.write(png)
+
+
+def png_write_rgba(path, width, height, rgba):
+    import struct
+    import zlib
+    raw = b''.join(b'\x00' + bytes(rgba[y * width * 4:(y + 1) * width * 4]) for y in range(height))
+    png = b'\x89PNG\r\n\x1a\n'
+    png += _png_chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0))
+    png += _png_chunk(b'IDAT', zlib.compress(raw, 9))
+    png += _png_chunk(b'IEND', b'')
+    with open(path, 'wb') as handle:
+        handle.write(png)
+
+
+def render_icon(paths, out_path, out_size):
+    """Painter-order composite of the SVG paths at 2x, box-downsampled for AA."""
+    ss = out_size * 2
+    masks = [svggeom.path_mask(subs, ss, ss) for _, subs in paths]
+    colors = [svggeom.hex_rgb(fill) for fill, _ in paths]
+    # Topmost path index per supersample pixel (painter order: last wins).
+    top = [-1] * (ss * ss)
+    for pi, mask in enumerate(masks):
+        for y in range(ss):
+            row = mask[y]
+            base = y * ss
+            for x in range(ss):
+                if row[x]:
+                    top[base + x] = pi
+    out = bytearray(out_size * out_size * 4)
+    f = ss // out_size
+    for oy in range(out_size):
+        for ox in range(out_size):
+            rs = gs = bs = cov = 0
+            for dy in range(f):
+                sy = oy * f + dy
+                srow = sy * ss + ox * f
+                for dx in range(f):
+                    pi = top[srow + dx]
+                    if pi >= 0:
+                        r, g, b = colors[pi]
+                        rs += r
+                        gs += g
+                        bs += b
+                        cov += 1
+            if cov:
+                i = (oy * out_size + ox) * 4
+                out[i] = rs // cov
+                out[i + 1] = gs // cov
+                out[i + 2] = bs // cov
+                out[i + 3] = 255 * cov // (f * f)
+    png_write_rgba(out_path, out_size, out_size, out)
+
+
+# ---------------------------------------------------------------------------
+# Preview rendering from the traced contours (what the font will hold).
+# ---------------------------------------------------------------------------
 
 
 def render_preview(path, glyph_sets, size=200, strip=32, zoom=6):
     """White canvas per glyph at `size`, plus the same shape rasterized at
     real pill size (`strip`, shown zoomed `zoom`x nearest). A glyph that
-    turns to mush at 32px is not a pill glyph, and 200px beauty shots hide
-    exactly that."""
+    turns to mush at pill size is not a pill glyph."""
     pad = 10
     w = pad + (size + pad) * len(glyph_sets)
     h = pad + size + pad + strip * zoom + 20
     img = bytearray([255] * (w * h))
 
-    def fill(contours, ox, oy, target, cell=1):
+    def fill(points, ox, oy, target, cell=1):
         for py in range(target):
             for px in range(target):
                 cx = px + 0.5
                 cy = py + 0.5
                 inside = False
-                for poly in contours:
+                for poly in points:
                     if point_in_loop((cx, cy), poly):
                         inside = not inside
                 if inside:
@@ -363,9 +396,8 @@ def render_preview(path, glyph_sets, size=200, strip=32, zoom=6):
                             if 0 <= gx < w and 0 <= gy < h:
                                 img[gy * w + gx] = 0
 
-    # Contours arrive in pixel space (y-down). One shared bbox/scale for all
-    # panels, exactly like placement() shares it in the font, so the two
-    # states are directly comparable.
+    # One shared bbox/scale for all panels, exactly like placement() shares
+    # it in the font, so the two states are directly comparable.
     xs = [p[0] for c in glyph_sets for loop in c for p in loop]
     ys = [p[1] for c in glyph_sets for loop in c for p in loop]
     x0, y0 = min(xs), min(ys)
@@ -378,31 +410,25 @@ def render_preview(path, glyph_sets, size=200, strip=32, zoom=6):
 
 
 def main():
-    out_woff2 = os.path.join(ROOT, 'resources', 'dsh-bridge-icons.woff2')
-    width, height, rgba = read_png_rgba(SOURCE)
-    mask = alpha_mask(width, height, rgba)
-    comps = components(mask, width, height)
-    keep = [c for c in comps if len(c) >= MIN_COMPONENT]
-    print(f'{SOURCE}: {width}x{height}, {len(comps)} components, kept sizes={[len(c) for c in keep]}')
+    paths = svggeom.load_ink_paths(SVG)
+    print(f'{SVG}: {len(paths)} inked paths')
+    path_masks = [svggeom.path_mask(subs, RASTER, RASTER) for _, subs in paths]
+    for (fill, subs), m in zip(paths, path_masks):
+        print(f'  path {fill}: {len(subs)} subpaths, {sum(sum(r) for r in m)} px (group nonzero)')
 
-    # Running glyph: every real component (body + fused spout jets), holes included.
-    on_mask = [[False] * width for _ in range(height)]
-    for comp in keep:
-        for x, y in comp:
-            on_mask[y][x] = True
-    classified_on = classify(boundary_loops(on_mask, width, height))
-    simplified_on = [(simplify_loop(loop, DP_TOLERANCE) if len(loop) > SIMPLIFY_MIN else list(loop), outer)
-                     for loop, outer in classified_on]
+    running_mask = or_masks(path_masks, RASTER, RASTER)
+    dropped = drop_small_components(running_mask, RASTER, RASTER, MIN_COMPONENT)
+    comps = components(running_mask, RASTER, RASTER)
+    print(f'union: {sum(sum(r) for r in running_mask)} px, {len(comps)} components '
+          f'{[len(c) for c in comps[:5]]}, dropped {dropped} specks')
 
-    # Stopped glyph: the body component alone. The shipped whale already
-    # rests on a flat waterline bar, so dropping the spray (activity) needs
-    # no cropping: a whale that stopped spouting IS the resting state.
-    body_mask = [[False] * width for _ in range(height)]
-    for x, y in keep[0]:
-        body_mask[y][x] = True
-    classified_off = classify(boundary_loops(body_mask, width, height))
-    simplified_off = [(simplify_loop(loop, DP_TOLERANCE) if len(loop) > SIMPLIFY_MIN else list(loop), outer)
-                      for loop, outer in classified_off]
+    # Running glyph: the full union (body with eye hole + spray with gaps).
+    simplified_on = trace_mask(running_mask, RASTER, RASTER)
+    # Stopped glyph: the largest component only, body without spray. Pixels
+    # of the other components are deleted, never the mask rebuilt, so the eye
+    # hole survives the copy.
+    stopped_mask = mask_from_component(comps[0], RASTER, RASTER)
+    simplified_off = trace_mask(stopped_mask, RASTER, RASTER)
 
     print('running glyph: loops=%s points=%s' % (
         [(len(loop), 'o' if outer else 'h') for loop, outer in simplified_on],
@@ -442,14 +468,17 @@ def main():
         'uniqueFontIdentifier': 'dsh-bridge pill icons',
         'fullName': 'DSH Bridge Pill Icons',
         'psName': 'dsh-bridge-pill-icons',
-        'version': '1.0',
+        'version': '1.1',
     })
     fb.setupOS2(sTypoAscender=EM, sTypoDescender=0, usWinAscent=EM, usWinDescent=0)
     fb.setupPost()
-    os.makedirs(os.path.dirname(out_woff2), exist_ok=True)
+    os.makedirs(os.path.dirname(FONT_OUT), exist_ok=True)
     fb.font.flavor = 'woff2'
-    fb.font.save(os.path.normpath(out_woff2))
-    print(f'wrote {os.path.normpath(out_woff2)} ({os.path.getsize(out_woff2)} bytes)')
+    fb.font.save(FONT_OUT)
+    print(f'wrote {FONT_OUT} ({os.path.getsize(FONT_OUT)} bytes)')
+
+    render_icon(paths, ICON_PNG, ICON_SIZE)
+    print(f'wrote {ICON_PNG} ({os.path.getsize(ICON_PNG)} bytes, {ICON_SIZE}px RGBA)')
     print('wrote temp/pill-preview.png')
 
 
