@@ -3,7 +3,9 @@
  *  - a clobbered or unparseable history makes every future sweep blind, and
  *    the restored zombie tab eats the window's menus again;
  *  - a non-loopback URL slipping in means the sweep could one day match and
- *    close a tab for a host it never served.
+ *    close a tab for a host it never served;
+ *  - a UI token landing in this plaintext file means every reader of the
+ *    harness home holds a key to the harness GUI (2026-11-11 review F3).
  */
 import { it, expect, describe } from 'vitest'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
@@ -16,13 +18,14 @@ function freshFile() {
 }
 
 describe('served-url history', () => {
-  it('records loopback URLs and replaces the row of a reused host:port', () => {
+  it('records loopback origins, replaces the row of a reused host:port, and never stores a token', () => {
     const file = freshFile()
     appendServedUrl(file, 'http://127.0.0.1:4001/?token=old')
     appendServedUrl(file, 'http://127.0.0.1:4002/?token=fresh')
     appendServedUrl(file, 'http://127.0.0.1:4001/?token=reborn')
-    const lines = readFileSync(file, 'utf8').trim().split('\n')
-    expect(lines).toEqual(['http://127.0.0.1:4002/?token=fresh', 'http://127.0.0.1:4001/?token=reborn'])
+    const text = readFileSync(file, 'utf8')
+    expect(text.trim().split('\n')).toEqual(['http://127.0.0.1:4002', 'http://127.0.0.1:4001'])
+    expect(text).not.toContain('token')
     expect(readServedHostPorts(file)).toEqual(['127.0.0.1:4002', '127.0.0.1:4001'])
   })
 

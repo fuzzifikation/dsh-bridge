@@ -19,7 +19,7 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 
-const BRIDGE_ID = 'System-Sciences.dsh-vllm-bridge'
+const BRIDGE_ID = 'System-Sciences.dsh-bridge'
 /** The exact string the product looks up. Casing drift here is a real bug. */
 const OWNER_ID = 'System-Sciences.vllm-copilot'
 

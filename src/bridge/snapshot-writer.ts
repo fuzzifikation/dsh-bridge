@@ -56,8 +56,10 @@ export function writeSnapshot(opts: {
 
   mkdirSync(path.dirname(opts.snapshotFile), { recursive: true })
   // tmp + rename, same discipline as the ledger file: a reader sees either the
-  // old snapshot or the new one, never half of both.
-  writeFileSync(`${opts.snapshotFile}.tmp`, text)
+  // old snapshot or the new one, never half of both. The snapshot carries your
+  // server request headers, so on POSIX it is written owner-only (Windows
+  // inherits the storage directory's ACL).
+  writeFileSync(`${opts.snapshotFile}.tmp`, text, { mode: 0o600 })
   renameSync(`${opts.snapshotFile}.tmp`, opts.snapshotFile)
   return { written: true, version: document.version, warnings: opts.payload.warnings }
 }

@@ -8,7 +8,7 @@
   ],
   "port": 8787,
   "host": "127.0.0.1",
-  "token": "spike-token-8f3a",
+  "token": "spike-local-token",
   "corePath": "%APPDATA%\\Code\\User\\globalStorage\\system-sciences.dsh-vllm-bridge\\dsh-home\\profiles\\vllmc\\node_modules\\vllm-copilot-core\\core\\index.js",
   "secretsSourceSnapshot": "%APPDATA%\\Code\\User\\globalStorage\\system-sciences.dsh-vllm-bridge\\dsh-home\\vllmc\\snapshot.json",
   "personalityDirs": {
@@ -19,7 +19,7 @@
   "captureFile": "system-messages.json",
   "registry": {
     "servers": [
-      { "id": "vllm-unifiedmixers-org", "serverUrl": "https://vllm.unifiedmixers.org" }
+      { "id": "vllm-example", "serverUrl": "https://vllm.example" }
     ],
     "models": [
       {
@@ -27,7 +27,7 @@
         "vllmModelId": "Qwen/Qwen3.8-Flash-Next-FP8",
         "displayName": "Qwen3.8-Flash-Next",
         "family": "qwen4_exp",
-        "server": "vllm-unifiedmixers-org",
+        "server": "vllm-example",
         "personality": "Sarcastic Robot",
         "maxOutputTokens": [32768, 16384, 8192],
         "capabilities": { "toolCalling": true, "imageInput": true },

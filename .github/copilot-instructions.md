@@ -1,8 +1,8 @@
-# AI Assistant Instructions: dsh-vllm-bridge
+# AI Assistant Instructions: dsh-bridge
 
 Companion to [vLLM-Copilot](https://github.com/fuzzifikation/vLLM-Copilot). Two artifacts, one repo:
 
-- **VS Code extension** (`src/`, marketplace id `dsh-vllm-bridge`, display "DeepSeek Harness Bridge (vLLM, local)"): installs the pinned `@deepseek-ai/dsh` into a private runtime directory and supervises `dsh web` under a dedicated `DSH_HOME`, writes the registry snapshot and dsh overlays, reports health, hands usage records to the main extension's ledger.
+- **VS Code extension** (`src/`, marketplace id `dsh-bridge`, display "DeepSeek Harness Bridge — run on your own models"): installs the pinned `@deepseek-ai/dsh` into a private runtime directory and supervises `dsh web` under a dedicated `DSH_HOME`, writes the registry snapshot and dsh overlays, reports health, hands usage records to the main extension's ledger.
 - **dsh adapter plugin** (`plugin/`, plain Node package, zero `vscode` imports): cordis plugin implementing dsh-llm's `LlmAdapter`, loaded inside the dsh process, routing every generation through the vLLM-Copilot core.
 
 ## Law and plans

@@ -5,10 +5,14 @@
  */
 import * as vscode from 'vscode'
 import { randomUUID } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import * as path from 'node:path'
 import { Bridge } from './bridge/bridge.js'
-import { bridgePaths, ensureBridgeDirs } from './bridge/paths.js'
+import { bridgePaths, ensureBridgeDirs, legacyHomeDirs } from './bridge/paths.js'
+import { acquireStartLock } from './bridge/start-lock.js'
+import { INSTALL_STAMP_FILE, isSafeVersionSpec } from './bridge/runtime.js'
+import { readPidRecord, probeHarness } from './bridge/supervisor.js'
+import { deletableWithin, directorySize, formatBytes } from './bridge/disk.js'
 import { asLedgerPort, type LedgerPort } from './bridge/api.js'
 import { spawn } from 'node:child_process'
 import { ControlServer } from './bridge/control-server.js'
@@ -566,6 +570,11 @@ const bridge = new Bridge({
     // and nothing offers "Open" before there is a URL to open.
     void vscode.commands.executeCommand('setContext', 'dshBridge.running', bridge.supervisor.running)
     void vscode.commands.executeCommand('setContext', 'dshBridge.ownerAvailable', mainExtensionInstalled())
+    // The stamp file is the whole truth about "installed": it is written by
+    // tmp+rename only after npm reported the runtime tree complete, and the
+    // uninstall deletes the directory holding it. The palette offers Uninstall
+    // exactly when there is something to uninstall.
+    void vscode.commands.executeCommand('setContext', 'dshBridge.installed', existsSync(path.join(paths.runtime, INSTALL_STAMP_FILE)))
     if (bridge.supervisor.running) {
       status.text = `$(dsh-bridge-whale) DSH${active ? ` $(zap)${active}` : ''}`
       status.tooltip = new vscode.MarkdownString(
@@ -878,6 +887,271 @@ const bridge = new Bridge({
     }),
   )
 
+  /** The dsh version sitting in the runtime directory, read from its own manifest. */
+  function installedDshVersion(): string | undefined {
+    try {
+      const marker = path.join(paths.runtime, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
+      return String((JSON.parse(readFileSync(marker, 'utf8')) as { version?: string }).version ?? '') || undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Install, update, or repair the harness WITHOUT ever spawning it: Start
+   * owns running, this owns having. The version choice is written to the one
+   * setting every window's restart listener already obeys (dshVersion is a
+   * BRIDGE_RESTART_KEYS member), so a running harness converges through the
+   * same drained restart a settings edit triggers - this command never
+   * invents a second restart path. A stopped harness is prepared right here:
+   * bridge.prepare() is idempotent and installs everything a start would
+   * (runtime, vendor staging, profile, adapter, snapshot) minus the spawn,
+   * under the same start lock Start holds, because concurrent npm installs
+   * into one runtime tree is the exact corruption start-lock.ts exists for.
+   */
+  async function installOrUpdateHarness(): Promise<void> {
+    const missing = await missingPrereqs()
+    if (missing.length) {
+      const fixes = missing.map((check) => check.fix).filter((fix): fix is string => Boolean(fix))
+      void vscode.window
+        .showErrorMessage(
+          `The DeepSeek Harness cannot be installed on this machine: ${missing.map((check) => check.summary).join('; ')}. ${fixes[0] ?? ''}`.trim(),
+          'Show Log',
+        )
+        .then((choice) => {
+          if (choice === 'Show Log') void output?.show()
+        })
+      return
+    }
+    let pin: string
+    try {
+      pin = readBundledPin()
+    } catch (err) {
+      void vscode.window.showErrorMessage(`DeepSeek Harness: ${(err as Error).message}`, 'Show Log')
+      return
+    }
+    const cfg = vscode.workspace.getConfiguration('dsh-bridge')
+    const currentSpec = (cfg.get<string>('dshVersion') ?? '').trim()
+    const installed = installedDshVersion()
+    const targetName = (spec: string): string => (spec === '' ? `certified ${pin}` : spec)
+    type Target = vscode.QuickPickItem & { spec?: string; repair?: boolean }
+    const items: Target[] = [
+      {
+        label: `$(shield) Certified version ${pin}`,
+        description: currentSpec === '' ? 'current choice' : undefined,
+        detail: 'The exact version this bridge was certified against. The safe answer.',
+        spec: '',
+      },
+      {
+        label: '$(rocket) Latest from npm (experimental)',
+        description: currentSpec === 'latest' ? 'current choice' : undefined,
+        detail: "dsh's semver is decorative: an uncertified release can change its config rows under the bridge.",
+        spec: 'latest',
+      },
+      {
+        label: '$(tag) An exact version…',
+        detail: 'Pin a specific release, e.g. to retest one this bridge does not certify.',
+      },
+    ]
+    if (installed) {
+      items.push({
+        label: `$(tools) Repair ${installed} from scratch`,
+        detail: 'Re-download the current version and restage the bridge files. Sessions, profile choices, and settings are kept.',
+        repair: true,
+      })
+    }
+    const picked = await vscode.window.showQuickPick(items, {
+      title: installed
+        ? `DeepSeek Harness ${installed} is installed · running target: ${targetName(currentSpec)}`
+        : 'Install the DeepSeek Harness (@deepseek-ai/dsh)',
+      placeHolder: 'Which version should the harness run?',
+      ignoreFocusOut: true,
+    })
+    if (!picked) return
+    let spec = picked.spec
+    if (spec === undefined && !picked.repair) {
+      const typed = await vscode.window.showInputBox({
+        title: `Exact @deepseek-ai/dsh version (the certified one is ${pin})`,
+        value: pin,
+        validateInput: (value) => (isSafeVersionSpec(value.trim()) ? undefined : 'Enter "latest" or an exact version like 0.2.0-rc.2'),
+        ignoreFocusOut: true,
+      })
+      if (typed === undefined) return
+      spec = typed.trim()
+    }
+    // A repair keeps whatever version is targeted now; it only clears stamps.
+    if (spec === undefined) spec = currentSpec
+    const changed = !picked.repair && spec !== currentSpec
+    if (bridge.supervisor.running || starting) {
+      if (!changed && !picked.repair) {
+        void vscode.window.showInformationMessage(`The harness already targets ${targetName(spec)}; nothing to do.`)
+        return
+      }
+      // The settings write below schedules the drained restart in every
+      // window (the owner executes it, borrowers log it). A repair writes no
+      // setting at all, so it schedules that restart itself.
+      if (changed) await cfg.update('dshVersion', spec, vscode.ConfigurationTarget.Global)
+      rmSync(path.join(paths.runtime, INSTALL_STAMP_FILE), { force: true })
+      if (picked.repair) {
+        // The same stamp logic one level up: deleting a completion promise is
+        // the only vocabulary the installers speak.
+        rmSync(paths.coreVersion, { force: true })
+        rmSync(paths.adapterStamp, { force: true })
+        scheduleRestart('a repair cleared the install stamps under a running harness')
+      }
+      void vscode.window.showInformationMessage(
+        bridge.supervisor.adopted
+          ? `Harness update to ${targetName(spec)} chosen; the window that started the harness will drain and restage it.`
+          : `Harness update to ${targetName(spec)} chosen; the running harness will drain and restage once its in-flight work lands.`,
+      )
+      render()
+      return
+    }
+    if (changed) await cfg.update('dshVersion', spec, vscode.ConfigurationTarget.Global)
+    if (changed || picked.repair) {
+      rmSync(path.join(paths.runtime, INSTALL_STAMP_FILE), { force: true })
+      if (picked.repair) {
+        rmSync(paths.coreVersion, { force: true })
+        rmSync(paths.adapterStamp, { force: true })
+      }
+    }
+    const held = await acquireStartLock({ lockFile: paths.startLock, pidFile: paths.pid, log: logger })
+    if (held.kind === 'adopt') {
+      void vscode.window.showInformationMessage('A harness started while you were choosing; its next restart picks up your choice.')
+      render()
+      return
+    }
+    if (held.kind === 'busy') {
+      void vscode.window.showWarningMessage('Another editor window is still preparing the harness; start the install again once it reports.')
+      return
+    }
+    try {
+      const prepared = await Promise.resolve(
+        vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: 'DeepSeek Harness', cancellable: false },
+          async (progress) => {
+            startProgress = (message, increment) =>
+              progress.report(increment === undefined ? { message } : { message, increment })
+            try {
+              return await bridge.prepare()
+            } finally {
+              startProgress = undefined
+            }
+          },
+        ),
+      )
+      // The download the first-run offer asks permission for has now been
+      // given and spent: the offer has nothing left to ask.
+      void context.globalState.update(ONBOARDED_KEY, true)
+      void vscode.window
+        .showInformationMessage(
+          `DeepSeek Harness ${prepared.dshVersion} is installed and ready, not running. Start it from the pill whenever you like.`,
+          'Start Harness',
+        )
+        .then((choice) => {
+          if (choice === 'Start Harness') void guardedStart()
+        })
+    } catch (err) {
+      logger.error(`harness install failed: ${(err as Error).message}`)
+      void vscode.window
+        .showErrorMessage(`DeepSeek Harness install failed: ${(err as Error).message}`, 'Show Log')
+        .then((choice) => {
+          if (choice === 'Show Log') void output?.show()
+        })
+    } finally {
+      held.lock.release()
+      render()
+    }
+  }
+
+  /**
+   * Take the harness off the machine, never the bridge: paths.ts promises one
+   * directory holds everything the harness owns, so uninstall is stop,
+   * confirm, and one recursive delete. What SURVIVES is the promise the
+   * confirmation makes out loud - the vLLM-Copilot registry, its usage
+   * totals, and this extension's settings all live elsewhere by design.
+   */
+  async function uninstallHarness(): Promise<void> {
+    if (starting) {
+      void vscode.window.showWarningMessage('A harness start is in flight; let it finish (or stop it) before uninstalling.')
+      return
+    }
+    // A harness another window spawned answers through the pid record long
+    // before this window would adopt it, and Windows denies deleting files a
+    // live process has open: force-deleting under it yields a half-deleted
+    // tree nobody can finish removing.
+    if (!bridge.supervisor.running) {
+      const record = readPidRecord(paths.pid)
+      if (record && (await probeHarness(record.url))) {
+        void vscode.window.showWarningMessage('The DeepSeek Harness is running (started from another window); stop it there first.')
+        return
+      }
+    }
+    if (bridge.supervisor.running) {
+      if (bridge.supervisor.adopted) {
+        void vscode.window.showWarningMessage('The DeepSeek Harness runs in a window that is not this one; stop it there first.')
+        return
+      }
+      const active = bridge.activeRequests()
+      const go = await vscode.window.showWarningMessage(
+        `Uninstall the DeepSeek Harness? ${active ? `Its ${active} in-flight request(s) end with it.` : 'The running harness stops first.'}`,
+        { modal: true },
+        'Stop and continue',
+      )
+      if (go !== 'Stop and continue') return
+      const result = await bridge.stop()
+      if (!result.drained) {
+        void vscode.window.showWarningMessage(`${result.remaining} in-flight harness request(s) were cut by the uninstall stop.`)
+      }
+      render()
+      // Read the served-URL history and close the tabs while the record still
+      // exists: a harness tab that outlives the delete is tomorrow's poisoned
+      // restore, and the sweep is the only thing that knows these URLs.
+      await sweepStaleTabs()
+    }
+    const pendingUsage = readdirSync(paths.outbox).filter((n) => n.endsWith('.json')).length
+    const confirm = await vscode.window.showWarningMessage(
+      'Uninstall the DeepSeek Harness?',
+      {
+        modal: true,
+        detail:
+          `This deletes the harness runtime, its profile, every saved session` +
+          `${pendingUsage ? `, and ${pendingUsage} usage record(s) your dashboard has not received yet` : ''} from:\n${paths.root}\n\n` +
+          'Your vLLM-Copilot servers, models, and usage totals are untouched - and so is this bridge. ' +
+          '"Install or Update Harness…" brings the harness back with fresh sessions.',
+      },
+      'Uninstall',
+    )
+    if (confirm !== 'Uninstall') return
+    // Recursive delete only where the bytes are truly ours: a junction
+    // planted at the harness home would hand rmSync whatever it points at.
+    if (!deletableWithin(paths.root, path.dirname(paths.root))) {
+      void vscode.window.showErrorMessage('Refusing to delete the harness home: it does not resolve inside the bridge\'s storage directory. Something replaced that folder - look into it before deleting anything by hand.')
+      return
+    }
+    let freed = 0
+    await Promise.resolve(
+      vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Uninstalling the DeepSeek Harness', cancellable: false },
+        async () => {
+          freed = directorySize(paths.root)
+          rmSync(paths.root, { recursive: true, force: true })
+          // The version-keyed homes of bridges up to 0.0.3 have the same
+          // owner, hold sessions nobody can reach, and get the same answer.
+          for (const legacy of legacyHomeDirs(context.globalStorageUri.fsPath, paths.root)) {
+            if (deletableWithin(legacy, context.globalStorageUri.fsPath)) rmSync(legacy, { recursive: true, force: true })
+          }
+        },
+      ),
+    )
+    // The offer is a first-run promise: a reinstall owes the user the ask.
+    void context.globalState.update(ONBOARDED_KEY, undefined)
+    render()
+    void vscode.window.showInformationMessage(
+      `DeepSeek Harness uninstalled (${formatBytes(freed)} freed). The bridge stays installed; "Install or Update Harness…" brings the harness back.`,
+    )
+  }
+
   // Ingestion runs on a timer rather than on a file watch: the outbox is a
   // directory the harness writes into from another process, and polling a
   // directory is portable in a way that reliable inotify events are not.
@@ -1012,6 +1286,17 @@ const bridge = new Bridge({
     vscode.commands.registerCommand('dshBridge.sweepStaleTabs', async () => {
       await sweepStaleTabs()
     }),
+    vscode.commands.registerCommand('dshBridge.installOrUpdate', async () => {
+      await installOrUpdateHarness()
+    }),
+    vscode.commands.registerCommand('dshBridge.uninstall', async () => {
+      await uninstallHarness()
+    }),
+    // The settings gear on the extension page does this; a keyboard user
+    // reaches it through the palette instead of a mouse menu.
+    vscode.commands.registerCommand('dshBridge.openSettings', () =>
+      void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:system-sciences.dsh-bridge dsh-bridge'),
+    ),
   )
 
   // The main extension is expected but not required: with it absent the harness

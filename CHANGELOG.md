@@ -1,8 +1,31 @@
 # Changelog
 
+## 0.1.3
+
+The full lifecycle is now commands, not folklore. Every verb a harness needs has a name in the palette, and each one hides itself when it would lie:
+
+- **New: "Install or Update Harness…"** — pick the certified version, `latest` (clearly labeled experimental), or an exact pin, or "Repair … from scratch". It installs without ever starting the harness, runs behind the same cross-window start lock as Start, and a running harness converges through the normal drained restart instead of a second path. Repair clears only the completion stamps — the npm runtime redownloads, the core restages, your sessions and settings stay.
+- **New: "Uninstall Harness"** — stops first (with an honest in-flight warning), confirms with what is about to die (runtime, profile, sessions, undelivered usage records), deletes the one `dsh-home` directory plus the legacy version-keyed ones, and reports the bytes freed. The bridge itself stays; the first-run offer comes back with a reinstall.
+- **New: "Open Bridge Settings"** — the gear, reachable without a mouse menu.
+- **Start got honest, not busy.** Its install behavior stays (a first Start still sets everything up), but the palette now knows what is installed: Uninstall appears exactly when there is a harness to remove, and Install/Update whenever the companion extension is present.
+- **Named for the product, not one door.** The extension is now "DeepSeek Harness Bridge — run on your own models": vLLM-Copilot is the first-class, usage-accounted source of models — and a hard requirement the Marketplace page and README now say out loud — but the harness stays plain dsh: providers a user declares inside dsh (its pi-ai adapter, shipped enabled and empty by design) appear in the same picker beside vLLM-Copilot's. The README FAQ documents the verified recipe and its one boundary: extra doors are honest, but only registry traffic reaches your token totals.
+- **The id became the name.** The extension is now `system-sciences.dsh-bridge` (was `dsh-vllm-bridge`): a publish rehearsal returned 404 for the old id — nothing had ever shipped under it, so this was the last moment a rename was free. Alpha testers on an older build: uninstall the old extension, install the new one, and move your `dsh-home` folder from the old storage directory to the new to keep your sessions. The internal dsh plugin keeps its name — inside the harness it honestly *is* the vLLM bridge.
+- **The two truths lead the page.** Alpha status, and the fact that every server, model, and mode is configured in vLLM-Copilot (never in this bridge), now open the Marketplace description and the README's first screen — so nobody discovers the dependency after installing, or hunts for model settings here.
+- **Security review before going public.** A full source and history review shaped this alpha: the embed proxy now refuses any browser request that admits it came from another site (drive-by pages can no longer ring the keyboard bridge or ride the harness session past its SameSite defense); the harness UI token no longer lands in the plaintext served-url history; token-carrying files are written owner-only on POSIX; harness URLs are trusted only on loopback, so no build can aim the panel at a stranger; uninstall refuses directories that do not really resolve inside the bridge's storage folder (a planted junction gets a refusal, not a recursive delete); and the certification rail accepts only exact versions, printing no copy-paste command for a registry string it cannot trust. The README gained a Security model section with the rest, including the honest one: the agent can run commands in your terminal, on purpose.
+- **The pill whale got redrawn by its owner.** The resting whale's belly is now a single open arc whose pocket reads at status-bar size without a hairline fighting the pixel grid, and the message chip's outline slimmed to 28 units. The stopped state still drops the whole chip and keeps the belly.
+
+## 0.1.2
+
+- **The pill whale slims down.** Outline strokes cut from 70 to 40 viewBox units (~0.6 px at status-bar size): the same artwork, no longer chunky. The stopped state now drops the whole message chip — ring and chevron alike — while the slim belly line stays on the resting whale.
+
+## 0.1.1
+
+- **The pill whale learned to speak monochrome.** The pill font now traces its own artwork, tuned for one ink: the terminal bubble is a chunky ring that floats above the whale only while the harness runs, and the belly reads as an outlined crescent instead of merging into a blob. Hairlines cannot survive the pill (anything under ~70 viewBox units is sub-pixel at status-bar size), so every line was measured, not eyeballed.
+- **The Marketplace icon fills its tile now.** The builder had been drawing the whale into the top-left quarter of the canvas — a viewBox-units-as-pixels coincidence at the old canvas size — and shipping it; the ink bbox is now fitted to the tile.
+
 ## 0.1.0
 
-First build published to the Marketplace, as a **pre-release**: alpha testers get it from extension search (Install dropdown › "Install Pre-Release Version") and every later fix arrives as an automatic update. Harness traffic reaching your usage totals needs vLLM-Copilot 1.37.1 or newer.
+First build. (Honest history: 0.1.0 itself never reached the Marketplace — the first listing went up with 0.1.3, uploaded through the publisher portal.) Alpha testers come through extension search, and every later fix arrives as an automatic update. Harness traffic reaching your usage totals needs vLLM-Copilot 1.37.1 or newer.
 
 - **First-run setup, and an honest look at the machine before it.** A fresh install now says what it needs instead of waiting for a command nobody knows. The setup offer names the one-time harness download, and every start checks for a real Node.js 22 or newer on PATH and a working npm before anything downloads. A missing prerequisite is named with its version and the fix, not with npm's own error text.
 - **The status-bar pill wears the whale.** Running shows the whale with its spout going; stopped shows the same whale, spray gone. The pill glyphs and the Marketplace icon are now both built from one vector artwork (`npm run icons:build`), so gallery and pill can never show two different whales.

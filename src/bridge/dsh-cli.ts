@@ -16,6 +16,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { resolveHarnessNode } from './supervisor.js'
+import { deletableWithin } from './disk.js'
 
 export interface DshResult {
   code: number
@@ -116,8 +117,14 @@ export async function requireDsh(opts: DshRunOptions): Promise<DshResult> {
 export async function ensureProfile(opts: { binPath: string; dshHome: string; profile: string; manifestFile: string }): Promise<void> {
   if (profileManifestUsable(opts.manifestFile)) return
   if (existsSync(opts.manifestFile)) {
-    // Present but broken: rebuild from scratch rather than build on rubble.
-    rmSync(path.dirname(opts.manifestFile), { recursive: true, force: true })
+    // Present but broken: rebuild from scratch rather than build on rubble -
+    // but only rubble inside the harness home. A junction planted at the
+    // profile directory is not ours to delete recursively.
+    const profileDir = path.dirname(opts.manifestFile)
+    if (!deletableWithin(profileDir, opts.dshHome)) {
+      throw new Error(`refusing to rebuild ${profileDir}: it does not resolve inside the harness home`)
+    }
+    rmSync(profileDir, { recursive: true, force: true })
   }
   await requireDsh({ ...opts, args: ['--profile', opts.profile, '--from-default-profile', 'web', '--dump-config'], timeoutMs: 300_000 })
 }

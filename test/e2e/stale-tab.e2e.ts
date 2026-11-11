@@ -21,7 +21,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 
-const BRIDGE_ID = 'System-Sciences.dsh-vllm-bridge'
+const BRIDGE_ID = 'System-Sciences.dsh-bridge'
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function labels(): string[] {

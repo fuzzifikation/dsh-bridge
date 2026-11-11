@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-Build everything the whale ships as: the pill font AND the Marketplace icon,
-both traced from one vector source, docs/images/icon_whale.svg.
+Build everything the whale ships as: the pill font AND the Marketplace icon.
+
+The font traces the PILL artwork, docs/images/pill_whale.svg: the same whale,
+owner-tuned for monochrome - interior lines are strokes that must CARVE (see
+CUT_FILLS) because one ink cannot paint them. The gallery icon rasterizes
+docs/images/icon_whale.svg in full color, untouched by pill constraints.
 
 Outputs:
   resources/dsh-bridge-icons.woff2  (`contributes.icons`, consumed as
@@ -16,14 +20,20 @@ Outputs:
 Why the icon is regenerated too: one artwork, one source. Pill and gallery
 are both rasterizations of the same paths, so they cannot drift apart.
 
-The monochrome silhouette is the UNION of the inked paths, and the union is
-taken at raster resolution, not in vector space: vector polygon booleans are
-their own research field, and at the viewBox's own 1024 units per pixel this
-loses nothing a 16px pill can show. Per-path fill uses the SVG default
-nonzero rule with all subpaths of a path sharing one winding counter, which
-is load-bearing: the eye and the spray's negative spaces are reversed
-subpaths and would silently fill solid under the obvious per-subpath OR
-(verified: path 0 group-nonzero 204652 = body 206110 - eye 1458).
+The monochrome silhouette is the UNION of the inked paths MINUS any cut
+paths, and both are taken at raster resolution, not in vector space: vector
+polygon booleans are their own research field, and at the viewBox's own 1024
+units per pixel this loses nothing a 16px pill can show. Per-path fill uses
+the SVG default nonzero rule with all subpaths of a path sharing one winding
+counter, which is load-bearing: the eye and the spray's negative spaces are
+reversed subpaths and would silently fill solid under the obvious per-subpath
+OR (verified: path 0 group-nonzero 204652 = body 206110 - eye 1458).
+
+The pill is monochrome: interior detail must be HOLES, not paint. So a path
+filled white (CUT_FILLS) is pill-only negative space - subtracted from the
+union, never painted into the gallery icon. The two-tone artwork keeps its
+colors for the gallery, and the belly line the colors cannot express in one
+ink is carved as a white path instead.
 
 Run:  python scripts/build-pill-font.py   (npm run icons:build)
 Requires: fonttools (+ brotli for woff2)
@@ -40,6 +50,7 @@ import svggeom
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
 SVG = os.path.join(ROOT, 'docs', 'images', 'icon_whale.svg')
+FONT_SVG = os.path.join(ROOT, 'docs', 'images', 'pill_whale.svg')  # pill-tuned artwork
 ICON_PNG = os.path.join(ROOT, 'docs', 'images', 'icon.png')
 FONT_OUT = os.path.join(ROOT, 'resources', 'dsh-bridge-icons.woff2')
 RASTER = 1024  # the SVG viewBox is 0 0 1024 1024: one raster px per unit
@@ -49,6 +60,34 @@ EM_TARGET = 840  # glyph longest side inside the em, leaves side bearings
 DP_TOLERANCE = 2.0  # raster units (1024 scale); 0.5 px on a 256 tile
 SIMPLIFY_MIN = 48  # loops under this many points stay pixel-exact
 MIN_COMPONENT = 200  # antialias specks are not glyph material at 1024
+CUT_FILLS = ('#ffffff', '#fff', 'white')  # white = carve, pill-only, never painted
+
+
+def path_class(rec):
+    """'cut' if the path's paint is white: white fill, or white stroke on an
+    unfilled shape (a carved line is a white stroke). Everything else is ink."""
+    fill, _, stroke = rec
+    color = fill if fill != 'none' else (stroke[0] if stroke else 'none')
+    return 'cut' if color in CUT_FILLS else 'ink'
+
+
+def path_mask_all(rec, width, height):
+    """A path's full footprint: fill region OR'd with its stroke band."""
+    fill, subs, stroke = rec
+    mask = None
+    if fill != 'none':
+        mask = svggeom.path_mask(subs, width, height)
+    if stroke:
+        band = svggeom.stroke_band_mask(subs, width, height, stroke[1])
+        if mask is None:
+            mask = band
+        else:
+            for y in range(height):
+                row, src = mask[y], band[y]
+                for x in range(width):
+                    if src[x]:
+                        row[x] = 1
+    return mask
 
 
 # ---------------------------------------------------------------------------
@@ -68,11 +107,28 @@ def or_masks(masks, width, height):
     return out
 
 
+def subtract_masks(base, cuts, width, height):
+    """Zero out every base pixel covered by any cut mask, in place."""
+    for cut in cuts:
+        for y in range(height):
+            row = base[y]
+            src = cut[y]
+            for x in range(width):
+                if src[x]:
+                    row[x] = 0
+
+
 def mask_from_component(comp, width, height):
     out = [bytearray(width) for _ in range(height)]
     for x, y in comp:
         out[y][x] = 1
     return out
+
+
+def comps_mask(keep):
+    """Union mask of the kept components (holes inside them stay intact)."""
+    return or_masks([mask_from_component(c, RASTER, RASTER) for c in keep],
+                    RASTER, RASTER)
 
 
 def components(mask, width, height):
@@ -327,11 +383,18 @@ def png_write_rgba(path, width, height, rgba):
         handle.write(png)
 
 
-def render_icon(paths, out_path, out_size):
-    """Painter-order composite of the SVG paths at 2x, box-downsampled for AA."""
+def render_icon(paths, out_path, out_size, content_fill=0.94):
+    """Painter-order composite of the SVG paths, fitted to the tile.
+
+    The ink bbox is centered as a square with a margin, so the tile never
+    carries stray viewBox whitespace: art floating in a 1024 canvas renders
+    as a thumbnail-size whale in a 128px extension view. Four supersample
+    taps per output pixel keep the antialiasing the aligned 2x box filter
+    gave before the crop went continuous.
+    """
     ss = out_size * 2
-    masks = [svggeom.path_mask(subs, ss, ss) for _, subs in paths]
-    colors = [svggeom.hex_rgb(fill) for fill, _ in paths]
+    masks = [svggeom.path_mask(subs, ss, ss) for _, subs, _ in paths]
+    colors = [svggeom.hex_rgb(fill) for fill, _, _ in paths]
     # Topmost path index per supersample pixel (painter order: last wins).
     top = [-1] * (ss * ss)
     for pi, mask in enumerate(masks):
@@ -341,16 +404,38 @@ def render_icon(paths, out_path, out_size):
             for x in range(ss):
                 if row[x]:
                     top[base + x] = pi
+
+    x_min = y_min = ss
+    x_max = y_max = -1
+    for i, pi in enumerate(top):
+        if pi >= 0:
+            x, y = i % ss, i // ss
+            if x < x_min:
+                x_min = x
+            if x > x_max:
+                x_max = x
+            if y < y_min:
+                y_min = y
+            if y > y_max:
+                y_max = y
+    side = min(max(x_max - x_min + 1, y_max - y_min + 1) / content_fill, float(ss))
+    cx = (x_min + x_max + 1) / 2.0
+    cy = (y_min + y_max + 1) / 2.0
+    x0 = min(max(cx - side / 2.0, 0.0), ss - side)
+    y0 = min(max(cy - side / 2.0, 0.0), ss - side)
+    step = side / out_size
+
     out = bytearray(out_size * out_size * 4)
-    f = ss // out_size
     for oy in range(out_size):
+        v = y0 + (oy + 0.5) * step
         for ox in range(out_size):
+            u = x0 + (ox + 0.5) * step
             rs = gs = bs = cov = 0
-            for dy in range(f):
-                sy = oy * f + dy
-                srow = sy * ss + ox * f
-                for dx in range(f):
-                    pi = top[srow + dx]
+            for du, dv in ((u - 0.25, v - 0.25), (u + 0.25, v - 0.25),
+                           (u - 0.25, v + 0.25), (u + 0.25, v + 0.25)):
+                tu, tv = int(du), int(dv)
+                if 0 <= tu < ss and 0 <= tv < ss:
+                    pi = top[tv * ss + tu]
                     if pi >= 0:
                         r, g, b = colors[pi]
                         rs += r
@@ -362,7 +447,7 @@ def render_icon(paths, out_path, out_size):
                 out[i] = rs // cov
                 out[i + 1] = gs // cov
                 out[i + 2] = bs // cov
-                out[i + 3] = 255 * cov // (f * f)
+                out[i + 3] = 255 * cov // 4
     png_write_rgba(out_path, out_size, out_size, out)
 
 
@@ -410,13 +495,21 @@ def render_preview(path, glyph_sets, size=200, strip=32, zoom=6):
 
 
 def main():
-    paths = svggeom.load_ink_paths(SVG)
-    print(f'{SVG}: {len(paths)} inked paths')
-    path_masks = [svggeom.path_mask(subs, RASTER, RASTER) for _, subs in paths]
-    for (fill, subs), m in zip(paths, path_masks):
-        print(f'  path {fill}: {len(subs)} subpaths, {sum(sum(r) for r in m)} px (group nonzero)')
+    all_paths = svggeom.load_ink_paths(FONT_SVG)
+    inked = [p for p in all_paths if path_class(p) == 'ink']
+    cut = [p for p in all_paths if path_class(p) == 'cut']
+    print(f'{FONT_SVG}: {len(inked)} inked paths, {len(cut)} cut paths')
+    path_masks = [path_mask_all(p, RASTER, RASTER) for p in inked]
+    for (fill, subs, stroke), m in zip(inked, path_masks):
+        print(f'  fill={fill} stroke={stroke}: {len(subs)} subpaths, '
+              f'{sum(sum(r) for r in m)} px')
 
     running_mask = or_masks(path_masks, RASTER, RASTER)
+    if cut:
+        subtract_masks(running_mask,
+                       [path_mask_all(p, RASTER, RASTER) for p in cut],
+                       RASTER, RASTER)
+        print(f'  after cuts: {sum(sum(r) for r in running_mask)} px remain')
     dropped = drop_small_components(running_mask, RASTER, RASTER, MIN_COMPONENT)
     comps = components(running_mask, RASTER, RASTER)
     print(f'union: {sum(sum(r) for r in running_mask)} px, {len(comps)} components '
@@ -424,10 +517,16 @@ def main():
 
     # Running glyph: the full union (body with eye hole + spray with gaps).
     simplified_on = trace_mask(running_mask, RASTER, RASTER)
-    # Stopped glyph: the largest component only, body without spray. Pixels
-    # of the other components are deleted, never the mask rebuilt, so the eye
-    # hole survives the copy.
-    stopped_mask = mask_from_component(comps[0], RASTER, RASTER)
+    # Stopped glyph: everything that is not chip debris floating above the
+    # whale - a whale whose message chip is gone (ring and chevron alike) IS
+    # the resting state. Dropping "largest component only" so thin
+    # (disconnected) outline arcs, like the belly at slim weights, survive.
+    if len(comps) > 1:
+        body_top = min(y for _, y in comps[0])
+        keep = [c for c in comps if min(y for _, y in c) >= body_top]
+        stopped_mask = comps_mask(keep) if keep else running_mask
+    else:
+        stopped_mask = running_mask
     simplified_off = trace_mask(stopped_mask, RASTER, RASTER)
 
     print('running glyph: loops=%s points=%s' % (
@@ -477,7 +576,9 @@ def main():
     fb.font.save(FONT_OUT)
     print(f'wrote {FONT_OUT} ({os.path.getsize(FONT_OUT)} bytes)')
 
-    render_icon(paths, ICON_PNG, ICON_SIZE)
+    gallery = [p for p in svggeom.load_ink_paths(SVG)
+               if path_class(p) == 'ink' and p[0] != 'none']
+    render_icon(gallery, ICON_PNG, ICON_SIZE)
     print(f'wrote {ICON_PNG} ({os.path.getsize(ICON_PNG)} bytes, {ICON_SIZE}px RGBA)')
     print('wrote temp/pill-preview.png')
 

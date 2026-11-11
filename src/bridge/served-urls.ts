@@ -53,9 +53,11 @@ function readLines(file: string): string[] {
 
 /**
  * Record a served URL, replacing any earlier entry for the same host:port
- * (a dead port is dead, and the freshest token URL is the honest row).
- * A rewrite of ten short lines per boot is free; the history being advisory
- * means a failed write warns and never fails a start.
+ * (a dead port is dead). Only the origin is stored, never the announced URL
+ * itself: readers re-derive host:port and nothing else, so the UI token this
+ * bridge passes around must never land in this file. A rewrite of ten short
+ * lines per boot is free; the history being advisory means a failed write
+ * warns and never fails a start.
  */
 export function appendServedUrl(file: string, url: string, log?: { warn(message: string): void }): void {
   const hostPort = loopbackHostPort(url)
@@ -64,7 +66,7 @@ export function appendServedUrl(file: string, url: string, log?: { warn(message:
     return
   }
   const kept = readLines(file).filter((line) => loopbackHostPort(line) !== hostPort)
-  kept.push(url)
+  kept.push(new URL(url).origin)
   try {
     mkdirSync(path.dirname(file), { recursive: true })
     writeFileSync(file, kept.slice(-MAX_ENTRIES).join('\n') + '\n')

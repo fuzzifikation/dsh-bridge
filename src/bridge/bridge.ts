@@ -151,7 +151,7 @@ export class Bridge {
     this.supervisor = new Supervisor({
       binPath: '',
       dshHome: deps.paths.root,
-      profile: 'vllmc',
+      profile: 'vllmc',
       pidFile: deps.paths.pid,
       activeDir: deps.paths.active,
       dshVersion: deps.dshVersion,
@@ -358,7 +358,8 @@ export class Bridge {
     const existing = existsSync(patchFile) ? readFileSync(patchFile, 'utf8') : ''
     const merged = overlay.mergePatchLayer(existing, result.yml)
     if (merged !== existing) {
-      writeFileSync(`${patchFile}.tmp`, merged)
+      // Owner-only on POSIX: the generated layer embeds the control bearer token.
+      writeFileSync(`${patchFile}.tmp`, merged, { mode: 0o600 })
       renameSync(`${patchFile}.tmp`, patchFile)
       // Our own regeneration is not a change to restart for; the watcher
       // must recognize the bytes.

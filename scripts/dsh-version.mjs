@@ -14,7 +14,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const pinFile = path.join(repoRoot, 'config', 'dsh.json')
 const EXACT = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/
 
-function assertExact(version, label) {
+export function assertExact(version, label) {
   if (!EXACT.test(version)) {
     throw new Error(`${label}: expected an exact semver version, got ${JSON.stringify(version)}`)
   }

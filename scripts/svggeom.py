@@ -234,19 +234,105 @@ def flatten_subpath(sub):
     return pts
 
 
+def _style_map(el):
+    props = {}
+    for decl in (el.get('style') or '').split(';'):
+        if ':' in decl:
+            k, v = decl.split(':', 1)
+            props[k.strip().lower()] = v.strip().lower()
+    return props
+
+
+def _prop(el, style, name):
+    """Effective property: style beats the presentation attribute (SVG spec)."""
+    v = style.get(name) or el.get(name)
+    return v.strip().lower() if v else ''
+
+
 def load_ink_paths(svg_path):
-    """SVG file -> [(fill, [flat subpaths])], fill='none' shapes skipped."""
+    """SVG file -> [(fill, [flat subpaths], stroke)]; stroke is (color, width) or None.
+
+    Fills and strokes both count as geometry; a shape with neither is skipped.
+    The effective fill is the SVG initial value, black, when absent - Inkscape
+    omits the attribute and puts the real values in style="".
+    """
     root = ET.parse(svg_path).getroot()
     out = []
     for el in root.iter():
         if not el.tag.endswith('}path') and el.tag != 'path':
             continue
-        fill = (el.get('fill') or '').strip().lower()
-        if fill in ('none', ''):
+        st = _style_map(el)
+        fill = _prop(el, st, 'fill') or 'black'
+        stroke_color = _prop(el, st, 'stroke') or 'none'
+        stroke = None
+        if stroke_color != 'none':
+            try:
+                width = float(_prop(el, st, 'stroke-width') or '1')
+            except ValueError:
+                width = 1.0
+            if width > 0:
+                stroke = (stroke_color, width)
+        if fill == 'none' and stroke is None:
             continue
         subs = parse_path(el.get('d'))
-        out.append((el.get('fill'), [flatten_subpath(s) for s in subs if len(s) > 1]))
+        out.append((fill, [flatten_subpath(s) for s in subs if len(s) > 1], stroke))
     return out
+
+
+def _chamfer(d, width, height):
+    """Two-pass chamfer distance transform, in place (straight 2, diagonal 3)."""
+    for y in range(height):
+        row, prev = d[y], d[y - 1] if y else None
+        for x in range(width):
+            v = row[x]
+            if x and row[x - 1] + 2 < v:
+                v = row[x - 1] + 2
+            if prev is not None:
+                if prev[x] + 2 < v:
+                    v = prev[x] + 2
+                if x and prev[x - 1] + 3 < v:
+                    v = prev[x - 1] + 3
+                if x + 1 < width and prev[x + 1] + 3 < v:
+                    v = prev[x + 1] + 3
+            row[x] = v
+    for y in range(height - 1, -1, -1):
+        row, nxt = d[y], d[y + 1] if y + 1 < height else None
+        for x in range(width - 1, -1, -1):
+            v = row[x]
+            if x + 1 < width and row[x + 1] + 2 < v:
+                v = row[x + 1] + 2
+            if nxt is not None:
+                if nxt[x] + 2 < v:
+                    v = nxt[x] + 2
+                if x and nxt[x - 1] + 3 < v:
+                    v = nxt[x - 1] + 3
+                if x + 1 < width and nxt[x + 1] + 3 < v:
+                    v = nxt[x + 1] + 3
+            row[x] = v
+
+
+def stroke_band_mask(subs, width, height, stroke_width):
+    """Stroke of the path outlines as a byte row mask, centered on the stroke line.
+
+    The stroked line is the boundary of the region the subpaths would fill
+    (nonzero rule), widened by half the stroke width on each side - raster
+    distance transform, no vector offsets.
+    """
+    fill = path_mask(subs, width, height)
+    r = max(2, int(round(stroke_width)))  # half-pixel chamfer units -> total band = width
+    big = 3 * (width + height) + 4
+    d_in = [[0 if fill[y][x] else big for x in range(width)] for y in range(height)]
+    d_out = [[big if fill[y][x] else 0 for x in range(width)] for y in range(height)]
+    _chamfer(d_in, width, height)
+    _chamfer(d_out, width, height)
+    band = [bytearray(width) for _ in range(height)]
+    for y in range(height):
+        b, di, do_ = band[y], d_in[y], d_out[y]
+        for x in range(width):
+            # dilated XOR eroded: within r of the region but not deep inside it
+            if (di[x] <= r) != (do_[x] > r):
+                b[x] = 1
+    return band
 
 
 def subpath_mask(points, width, height):

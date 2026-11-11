@@ -87,8 +87,9 @@ export function readPidRecord(pidFile: string): PidRecord | undefined {
 export function writePidRecord(pidFile: string, record: PidRecord): void {
   mkdirSync(path.dirname(pidFile), { recursive: true })
   // tmp + rename: a torn pid file is worse than none, because the next window
-  // cannot tell which pid to reap and may leave the orphan running.
-  writeFileSync(`${pidFile}.tmp`, JSON.stringify(record, null, 2) + '\n')
+  // cannot tell which pid to reap and may leave the orphan running. The mode
+  // bit matters on POSIX: the record carries the harness UI token.
+  writeFileSync(`${pidFile}.tmp`, JSON.stringify(record, null, 2) + '\n', { mode: 0o600 })
   renameSync(`${pidFile}.tmp`, pidFile)
 }
 
@@ -236,6 +237,15 @@ export function classifyPidRecord(pidFile: string, log?: SupervisorLog): PidReco
  */
 export async function probeHarness(url: string, timeoutMs = 1500): Promise<boolean> {
   if (!url) return false
+  // The bridge only ever talks to a harness it launched, on loopback. A pid
+  // record or stdout line naming any other host is a bug or a hostile dsh
+  // build; probing it would hand a stranger our tokens and liveness.
+  try {
+    const u = new URL(url)
+    if (u.protocol !== 'http:' || (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost')) return false
+  } catch {
+    return false
+  }
   try {
     await fetch(url, { signal: AbortSignal.timeout(timeoutMs), redirect: 'manual' })
     return true
@@ -245,8 +255,10 @@ export async function probeHarness(url: string, timeoutMs = 1500): Promise<boole
   }
 }
 
-/** `dsh web: http://127.0.0.1:58370/?token=<secret>` on stdout. */
-const URL_LINE = /dsh web:\s*(http:\/\/\S+)/
+/** `dsh web: http://127.0.0.1:58370/?token=<secret>` on stdout. Loopback
+ * hosts only: a build announcing some other origin gets no URL, and the
+ * start fails like the harness never reported one. */
+const URL_LINE = /dsh web:\s*(http:\/\/(?:127\.0\.0\.1|localhost)(?::\d{1,5})?(?:\/\S*)?)/
 
 /** The token authenticates the harness UI, so it never goes near a log. */
 export function redactUrl(url: string): string {
@@ -261,7 +273,7 @@ export function redactUrl(url: string): string {
 export interface SupervisorOptions {
   binPath: string
   dshHome: string
-  profile: string
+  profile: string
   pidFile: string
   activeDir: string
   /**

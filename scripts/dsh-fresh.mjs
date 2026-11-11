@@ -25,7 +25,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describeDshVersion, readPin, writePin } from './dsh-version.mjs'
+import { describeDshVersion, readPin, writePin, assertExact } from './dsh-version.mjs'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const DSH_PKG = '@deepseek-ai/dsh'
@@ -115,9 +115,14 @@ function adopt(version) {
 const flagIndex = process.argv.findIndex((a) => a === '--adopt' || a === '--probe')
 if (flagIndex !== -1) {
   const mode = process.argv[flagIndex]
-  const version = process.argv[flagIndex + 1]
-  if (!version) {
-    console.error(`usage: node scripts/dsh-fresh.mjs ${mode} <exact-version>`)
+  let version
+  try {
+    // The version continues into `npm view ... --json` under shell:true on
+    // Windows: an exact semver here is the only place that can say so, and
+    // adopt() passes the same string to setPeer. Guard once, trust everywhere.
+    version = assertExact(process.argv[flagIndex + 1], mode)
+  } catch (err) {
+    console.error(err.message)
     process.exit(2)
   }
   if (mode === '--adopt') adopt(version)
@@ -133,12 +138,27 @@ if (overridden) {
   process.exit(0)
 }
 if (tags.latest !== pinned) {
-  console.error(`DRIFT: upstream latest ${tags.latest} != certified pin ${pinned}.`)
-  console.error(`  probe:  node scripts/dsh-fresh.mjs --probe ${tags.latest}`)
-  console.error(`  adopt:  node scripts/dsh-fresh.mjs --adopt ${tags.latest}`)
+  console.error(`DRIFT: upstream latest ${JSON.stringify(tags.latest)} != certified pin ${pinned}.`)
+  // The suggested lines below are made to be pasted into a shell, and their
+  // version comes from the registry: only an exact semver gets printed.
+  let exactLatest
+  try {
+    exactLatest = assertExact(tags.latest, 'registry dist-tag "latest"')
+  } catch {
+    console.error('  the registry served a dist-tag that is not an exact version; refusing to print a copy-paste command for it.')
+    process.exit(1)
+  }
+  console.error(`  probe:  node scripts/dsh-fresh.mjs --probe ${exactLatest}`)
+  console.error(`  adopt:  node scripts/dsh-fresh.mjs --adopt ${exactLatest}`)
   process.exit(1)
 }
 console.log(`up to date: certified pin equals upstream latest (${pinned})`)
 if (tags.alpha && tags.alpha !== tags.latest) {
-  console.log(`alpha available for a canary: node scripts/dsh-fresh.mjs --probe ${tags.alpha}`)
+  let exactAlpha
+  try {
+    exactAlpha = assertExact(tags.alpha, 'registry dist-tag "alpha"')
+  } catch {
+    exactAlpha = undefined
+  }
+  if (exactAlpha) console.log(`alpha available for a canary: node scripts/dsh-fresh.mjs --probe ${exactAlpha}`)
 }

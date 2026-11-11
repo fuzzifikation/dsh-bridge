@@ -66,6 +66,14 @@ function npmCommand(args: string[]): string {
 const execAsync = promisify(exec)
 
 /**
+ * Records that an npm install into `runtimeDir` ran to completion. Exported
+ * because the commands that install, update, repair, and uninstall speak of
+ * this file by name; deleting it is the only supported way to tell an
+ * installer "your stamp no longer counts".
+ */
+export const INSTALL_STAMP_FILE = '.install-complete'
+
+/**
  * Awaited, not `spawnSync`: this runs on the extension host during a first
  * boot, and a synchronous npm install of the whole dsh tree would freeze the
  * window (and every spinner in it) for as long as the registry takes.
@@ -122,7 +130,7 @@ export async function ensureDshRuntime(opts: { runtimeDir: string; version: stri
   const matches = (current: string | undefined): boolean =>
     current !== undefined && (EXACT.test(version) ? current === version : true)
   // dsh's own package.json lands long before npm finishes its dependencies, so a window closed mid-install leaves a tree that looks installed.
-  const stamp = path.join(runtimeDir, '.install-complete')
+  const stamp = path.join(runtimeDir, INSTALL_STAMP_FILE)
   if (!matches(installedVersion()) || !existsSync(stamp)) {
     rmSync(stamp, { force: true })
     rmSync(path.join(runtimeDir, 'node_modules'), { recursive: true, force: true })

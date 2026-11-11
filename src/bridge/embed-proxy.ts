@@ -220,7 +220,40 @@ export class EmbedProxy {
     return location
   }
 
+  /**
+   * The drive-by gate. The browser traffic this proxy may serve is exactly
+   * two things: same-origin requests from the harness panel's own document
+   * (beacons, app traffic, websockets) and the GET navigations whose fetch
+   * destination says iframe/document - the one jump from the webview shell
+   * into this origin. Anything that announces itself - Origin header or
+   * Sec-Fetch-* - as coming from ANY other site, including other local
+   * ports, is refused before it reads a byte, rings a beacon, or rides the
+   * cookie jar the harness's SameSite=Strict defense keeps browsers away
+   * from. Requests carrying no browser identity are local tools, the same
+   * trust domain the harness itself grants them; only the browser's own
+   * word can condemn a request.
+   */
+  private crossSite(req: IncomingMessage): boolean {
+    const origin = req.headers.origin
+    if (typeof origin === 'string' && origin !== this.address) return true
+    const site = req.headers['sec-fetch-site']
+    if (typeof site !== 'string' || site === 'same-origin' || site === 'none') return false
+    const method = (req.method ?? 'GET').toUpperCase()
+    const dest = req.headers['sec-fetch-dest']
+    return !((method === 'GET' || method === 'HEAD') && (dest === 'iframe' || dest === 'document'))
+  }
+
+  private refuse(req: IncomingMessage, res: ServerResponse): void {
+    this.deps.log.debug?.(`embed proxy refused a foreign request (${req.headers['sec-fetch-site'] ?? req.headers.origin ?? '?'}) for ${(req.url ?? '/').split('?')[0]}`)
+    res.writeHead(403, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ error: 'cross-origin request refused' }))
+  }
+
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (this.crossSite(req)) {
+      this.refuse(req, res)
+      return
+    }
     if ((req.url ?? '').startsWith('/__dsh-title')) {
       // The beacon's own report: writes one string into the extension's map,
       // reads nothing, so it answers before auth and forwards nothing.
@@ -330,6 +363,10 @@ export class EmbedProxy {
 
   /** WebSocket relay: rewrite the handshake, then splice raw bytes both ways. */
   private async handleUpgrade(req: IncomingMessage, client: import('node:stream').Duplex, head: Buffer): Promise<void> {
+    if (this.crossSite(req)) {
+      client.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+      return
+    }
     const target = this.target
     if (!target || !(await this.ensureSession())) {
       client.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n')
