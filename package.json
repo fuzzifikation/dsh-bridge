@@ -1,12 +1,18 @@
 {
   "name": "dsh-vllm-bridge",
   "displayName": "DeepSeek Harness Bridge (vLLM, local)",
-  "version": "0.0.17",
+  "version": "0.1.0",
+  "preview": true,
   "type": "module",
   "description": "Runs the DeepSeek Harness (dsh) entirely on your vLLM-Copilot registry: your models, your servers, your token totals, no DeepSeek account.",
   "license": "MIT",
   "author": "Dieter Schwarzmann <info@systemwissenschaften.de>",
   "publisher": "System-Sciences",
+  "icon": "docs/images/icon.png",
+  "galleryBanner": {
+    "color": "#0B1524",
+    "theme": "dark"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/fuzzifikation/dsh-vllm-bridge"
@@ -95,6 +101,16 @@
         "category": "DSH Bridge"
       }
     ],
+    "icons": {
+      "dsh-bridge-whale": {
+        "description": "DSH whale, spouting: the harness is running.",
+        "default": { "fontPath": "./resources/dsh-bridge-icons.woff2", "fontCharacter": "\\E001" }
+      },
+      "dsh-bridge-whale-off": {
+        "description": "DSH whale at rest: the harness is stopped.",
+        "default": { "fontPath": "./resources/dsh-bridge-icons.woff2", "fontCharacter": "\\E002" }
+      }
+    },
     "menus": {
       "editor/title": [
         {
@@ -213,11 +229,13 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p tsconfig.json",
+    "compile": "node -e \"require('node:fs').rmSync('out',{recursive:true,force:true})\" && tsc -p tsconfig.json",
     "build": "npm run compile && vsce package",
+    "publish:prerelease": "vsce publish --pre-release",
     "watch": "tsc -w -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "stage:core": "node scripts/stage-core.mjs",
+    "icons:build": "python scripts/build-pill-font.py",
     "boot:check": "node scripts/stage-core.mjs && node scripts/step2-boot-check.mjs",
     "test:e2e:compile": "node -e \"require('node:fs').rmSync('out-e2e',{recursive:true,force:true})\" && tsc -p test/e2e/tsconfig.json",
     "test:e2e": "npm run compile && npm run test:e2e:compile && node scripts/e2e-stand-in.mjs && node -e \"require('node:fs').mkdirSync('temp/e2e-workspace',{recursive:true})\" && node node_modules/@vscode/test-cli/out/bin.mjs",

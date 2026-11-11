@@ -11,3 +11,5 @@ temp/
 .DS_Store
 # spike runtime output (capture file written by spike/gateway/gateway.mjs)
 spike/gateway/system-messages.json
+
+__pycache__/

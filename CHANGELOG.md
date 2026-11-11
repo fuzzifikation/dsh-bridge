@@ -1,7 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.1.0
 
+First build published to the Marketplace, as a **pre-release**: alpha testers get it from extension search (Install dropdown › "Install Pre-Release Version") and every later fix arrives as an automatic update. Harness traffic reaching your usage totals needs vLLM-Copilot 1.37.1 or newer.
+
+- **First-run setup, and an honest look at the machine before it.** A fresh install now says what it needs instead of waiting for a command nobody knows. The setup offer names the one-time harness download, and every start checks for a real Node.js 22 or newer on PATH and a working npm before anything downloads. A missing prerequisite is named with its version and the fix, not with npm's own error text.
+- **The status-bar pill wears the whale.** Running shows the extension's whale with its spout going; stopped shows the same whale at rest on its waterline. The outlines are traced from the Marketplace icon itself, so pill and gallery art can never drift apart.
 - **The harness is now an editor tab, not a browser page.** It opens chromeless inside VS Code (default `panel`): no address bar, and each tab is named after the conversation it shows (`DSH — <chat>`). The view's address survives harness restarts, and tabs come back on their own after window reloads.
 - **Several harness views.** The `+` in the tab's title bar (or "DSH: Open Another Harness View") opens a second full GUI with its own session selection; views split, and "Move into New Window" gives a chat a window of its own.
 - **VS Code shortcuts answer from inside the harness**: `F1`/`Ctrl+Shift+P`, `Ctrl+P`, `Ctrl+B`, `Ctrl+,`, `Ctrl+W` and friends work wherever the cursor is — and every shortcut the harness handles itself stays the harness's.

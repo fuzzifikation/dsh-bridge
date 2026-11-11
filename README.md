@@ -13,12 +13,16 @@ You install the extension. It installs a pinned `@deepseek-ai/dsh` into a privat
 
 ## Requirements
 
-- Node.js 22+ with `npm` on PATH (the extension installs the pinned harness with it; dsh's own packages require Node 22)
+- Node.js 22+ with `npm` on PATH (the extension installs the pinned harness with it; dsh's own packages require Node 22). The bridge checks both before the first download and names what is missing.
 - The [vLLM-Copilot](https://github.com/fuzzifikation/vLLM-Copilot) extension with at least one working server and model
+
+## Alpha testing
+
+This extension ships as a **pre-release**. In VS Code: search "DeepSeek Harness Bridge", then Install dropdown (the arrow next to Install) › "Install Pre-Release Version". Later alpha builds then arrive as automatic updates; "Switch to Release Version" leaves the channel whenever you want out. On first run the bridge asks before downloading anything and verifies the prerequisites on your machine. Harness traffic reaches your usage totals with vLLM-Copilot 1.37.1 or newer; with an older companion the bridge still works and holds the records, visibly, until the companion catches up.
 
 ## Status
 
-Pre-alpha (0.0.x), one developer. The loop works end to end: your registry becomes the harness's model list, models your servers stopped serving are hidden, the harness opens as a chromeless tab inside VS Code — per-chat tab titles, VS Code chords answering from inside the frame — the agent can call editor tools (diagnostics, open files and diffs, terminal commands, questions back to you), and harness traffic lands in the vLLM-Copilot usage ledger. Windows is the tested platform; others are untested. The design law for this repo (architecture, owner rulings, verification gates) lives in [docs/dsh-bridge-plan.md](docs/dsh-bridge-plan.md), this repo's own since 2026-10-08.
+Alpha (0.1.x pre-release), one developer. The loop works end to end: your registry becomes the harness's model list, models your servers stopped serving are hidden, the harness opens as a chromeless tab inside VS Code — per-chat tab titles, VS Code chords answering from inside the frame — the agent can call editor tools (diagnostics, open files and diffs, terminal commands, questions back to you), and harness traffic lands in the vLLM-Copilot usage ledger. Windows is the tested platform; others are untested. The design law for this repo (architecture, owner rulings, verification gates) lives in [docs/dsh-bridge-plan.md](docs/dsh-bridge-plan.md), this repo's own since 2026-10-08.
 
 ## Documentation
 
@@ -31,3 +35,5 @@ Pre-alpha (0.0.x), one developer. The loop works end to end: your registry becom
 ## License
 
 MIT. Contains no code from other projects; if that ever changes, attribution lands in `THIRD-PARTY-NOTICES.txt`.
+
+DeepSeek is a trademark of its owner, and VS Code is a trademark of Microsoft. Both names appear here only to state what this bridge works with, and the Marketplace icon is original artwork that incorporates neither company's logo: this extension is independent, not affiliated with, endorsed by, or sponsored by either.

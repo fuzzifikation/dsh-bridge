@@ -18,10 +18,17 @@ import { createEditorTools } from './bridge/editor-tools.js'
 import { readBridgeSettings, readMainRegistry, mainExtensionInstalled, MAIN_EXT_ID } from './bridge/settings.js'
 import { drainActiveRequests } from './bridge/ingest.js'
 import { originAnswers, readServedHostPorts, servedUrlsFile } from './bridge/served-urls.js'
+import { runPreflight, type PrereqCheck } from './bridge/preflight.js'
 
 const RESTART_DEBOUNCE_MS = 1500
 /** Deactivate must not hold the extension host hostage, unlike a deliberate restart. */
 const SHUTDOWN_DRAIN_BUDGET_MS = 5000
+/**
+ * One setup offer per install, surviving window reloads and extension updates
+ * (globalState outlives both). The offer is the only automatic word a fresh
+ * install gets; every later start is the user's own.
+ */
+const ONBOARDED_KEY = 'dshBridge.setupOffered'
 /**
  * Bridge settings the harness reads at boot, so changing one means a restart.
  * Everything else (`drainTimeoutSeconds` is read per stop, `ingestIntervalSeconds`
@@ -560,7 +567,7 @@ const bridge = new Bridge({
     void vscode.commands.executeCommand('setContext', 'dshBridge.running', bridge.supervisor.running)
     void vscode.commands.executeCommand('setContext', 'dshBridge.ownerAvailable', mainExtensionInstalled())
     if (bridge.supervisor.running) {
-      status.text = `$(radio-tower) DSH${active ? ` $(zap)${active}` : ''}`
+      status.text = `$(dsh-bridge-whale) DSH${active ? ` $(zap)${active}` : ''}`
       status.tooltip = new vscode.MarkdownString(
         [
           `**DeepSeek Harness: running**`,
@@ -607,7 +614,7 @@ const bridge = new Bridge({
       status.command = 'workbench.view.extensions'
       return
     }
-    status.text = '$(debug-disconnect) DSH: stopped'
+    status.text = '$(dsh-bridge-whale-off) DSH: stopped'
     status.tooltip = 'The DeepSeek Harness is not running. Click to start it.'
     status.command = 'dshBridge.start'
   }
@@ -715,8 +722,40 @@ const bridge = new Bridge({
     }
   }
 
+  /**
+   * Machine prerequisites, asked once per window. The extension host's PATH is
+   * frozen when the editor launches, so a fix performed mid-session is
+   * invisible until a restart anyway: caching the first answer cannot go
+   * stale, and no start pays for the probes twice.
+   */
+  let preflightChecks: Promise<PrereqCheck[]> | undefined
+  async function missingPrereqs(): Promise<PrereqCheck[]> {
+    preflightChecks ??= runPreflight().then((checks) => {
+      for (const check of checks) (check.ok ? logger.info : logger.warn)(`prerequisite ${check.name}: ${check.summary}`)
+      return checks
+    })
+    return (await preflightChecks).filter((check) => !check.ok)
+  }
+
   async function guardedStart(): Promise<string | undefined> {
     if (bridge.supervisor.running && bridge.supervisor.url) return bridge.supervisor.url
+    // Prerequisites are named before any download starts. Without this gate a
+    // missing npm surfaced as cmd.exe's "not recognized as an internal or
+    // external command" inside a start failure, and a Node older than dsh's
+    // engine floor installed the whole tree before dying downstream.
+    const missing = await missingPrereqs()
+    if (missing.length) {
+      const fixes = missing.map((check) => check.fix).filter((fix): fix is string => Boolean(fix))
+      void vscode.window
+        .showErrorMessage(
+          `The DeepSeek Harness cannot start on this machine: ${missing.map((check) => check.summary).join('; ')}. ${fixes[0] ?? ''}`.trim(),
+          'Show Log',
+        )
+        .then((choice) => {
+          if (choice === 'Show Log') void output?.show()
+        })
+      return undefined
+    }
     // Best effort: a harness whose control channel failed to start still
     // runs; its agent simply never sees the editor tools (the MCP client
     // cannot dial a dead endpoint and mounts nothing).
@@ -734,7 +773,11 @@ const bridge = new Bridge({
           startProgress = (message, increment) =>
             progress.report(increment === undefined ? { message } : { message, increment })
           try {
-            return await bridge.start()
+            const url = await bridge.start()
+            // A start that completed IS the setup offer's acceptance, whether
+            // it came from the button, the pill or the palette.
+            void context.globalState.update(ONBOARDED_KEY, true)
+            return url
           } finally {
             startProgress = undefined
           }
@@ -1013,6 +1056,31 @@ const bridge = new Bridge({
   // buttons in the notices above. A harness the user did not ask for never
   // installs a runtime, opens a port, or spends tokens on its own.
   render()
+
+  // First run after an install, reached only when the companion is present and
+  // its registry offers models (the early returns above own those gaps). The
+  // offer asks for the one thing the user has not been offered yet: the dsh
+  // download. Pressing the button IS the manual ask the ruling above demands;
+  // "Later" says nothing again, forever, and the pill stays. An install that
+  // booted into a broken environment keeps the flag unset, so the offer lands
+  // on the first window where the notice can actually be acted on.
+  if (!context.globalState.get<boolean>(ONBOARDED_KEY)) {
+    void vscode.window
+      .showInformationMessage(
+        'DeepSeek Harness Bridge is installed, and your vLLM-Copilot registry has models to offer. '
+          + 'The harness itself (@deepseek-ai/dsh) downloads once into the bridge\u2019s own directory: about 2-3 minutes, '
+          + 'and it needs Node.js 22 or newer with npm on PATH. Set it up now?',
+        'Check prerequisites and start',
+        'Later',
+      )
+      .then(async (choice) => {
+        await context.globalState.update(ONBOARDED_KEY, true)
+        if (choice === 'Check prerequisites and start') {
+          await guardedStart()
+          render()
+        }
+      })
+  }
 
   context.subscriptions.push({
     // Deactivate is best effort: it does not run at all when the host dies,

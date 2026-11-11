@@ -4,6 +4,7 @@
 # carries the Marketplace icon (docs/* + re-include: a whole excluded folder
 # can never be re-entered, its children can).
 .vscode-test/
+.vscode-test.mjs
 .tools/
 .vllm/
 .dsh-acl-recovery/
