@@ -1,7 +1,7 @@
 {
   "name": "dsh-bridge",
   "displayName": "DeepSeek Harness Bridge — run on your own models",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "preview": true,
   "type": "module",
   "description": "Alpha testing. Requires vLLM-Copilot — that is where your local models are configured. Then run the DeepSeek Harness (dsh) on your own models: your servers, your token totals, no DeepSeek account.",

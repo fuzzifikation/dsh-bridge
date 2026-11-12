@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.1.4
+## 0.1.5
+
+(Honest history: this content was briefly packaged as 0.1.4 during the same day's work; 0.1.4 never reached the Marketplace, so the number moved instead of the history.)
 
 Linux grew up from "should work" to "did work", and the walkthrough found a prerequisite nobody had named.
 
