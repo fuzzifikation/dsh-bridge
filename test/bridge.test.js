@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 
 import { bridgePaths, ensureBridgeDirs, legacyHomeDirs } from '../out/bridge/paths.js'
@@ -225,7 +225,7 @@ describe('snapshot: bridge writes what the plugin reads', () => {
 })
 
 describe('pid file: one shared harness, no murdered strangers', () => {
-  it('leaves a live harness alone and clears one that died', () => {
+  it('leaves a live harness alone and clears one that died', async () => {
     const p = paths()
     // A real child process, not a made-up pid: pids get recycled, and a bridge
     // that kills whatever number it finds would shoot an unrelated program.
@@ -244,8 +244,11 @@ describe('pid file: one shared harness, no murdered strangers', () => {
       expect(existsSync(p.pid)).toBe(true)
 
       child.kill()
-      const deadline = Date.now() + 5000
-      while (isProcessAlive(child.pid) && Date.now() < deadline) spawnSync(process.execPath, ['-p', '1'], { windowsHide: true })
+      // POSIX keeps a killed child as a zombie until this process reaps it,
+      // and the reap runs on the event loop: await 'exit' instead of burning
+      // the budget in a synchronous spin, or signal-0 keeps answering "alive"
+      // for a corpse only the kernel's bookkeeping has not buried.
+      await new Promise((resolve) => child.once('exit', resolve))
 
       expect(classifyPidRecord(p.pid)).toMatchObject({ kind: 'stale', pid: child.pid })
       expect(existsSync(p.pid)).toBe(false)

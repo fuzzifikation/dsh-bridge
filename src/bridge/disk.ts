@@ -49,14 +49,22 @@ export function formatBytes(bytes: number): string {
  * AT its target, and unprivileged users can plant junctions, so the honest
  * question is not what the path string says but where it really lands: the
  * resolved directory must be inside the resolved boundary, never the boundary
- * itself. Case-insensitive, because the filesystem this guards is Windows.
+ * itself. Case folding is a Windows-only courtesy: NTFS answers a wrong-case
+ * path with the same directory, so containment must ignore case there. On a
+ * case-sensitive filesystem `Dsh-home` is a different directory, and folding
+ * there would wave a case-variant sibling through the gate; realpath already
+ * hands us the truth, so compare it byte-exact.
  */
 export function deletableWithin(dir: string, boundary: string): boolean {
   try {
-    const norm = (p: string): string => p.replace(/[\\/]+$/, '').toLowerCase()
+    const foldCase = process.platform === 'win32'
+    const norm = (p: string): string => {
+      const trimmed = p.replace(/[\\/]+$/, '')
+      return foldCase ? trimmed.toLowerCase() : trimmed
+    }
     const real = norm(realpathSync(dir))
     const root = norm(realpathSync(boundary))
-    if (real === root || !real.startsWith(root + path.sep.toLowerCase())) return false
+    if (real === root || !real.startsWith(root + path.sep)) return false
     return lstatSync(real).isDirectory()
   } catch {
     return false

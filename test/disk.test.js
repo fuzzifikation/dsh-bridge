@@ -58,4 +58,31 @@ describe('deletableWithin', () => {
       rmSync(base, { recursive: true, force: true })
     }
   })
+
+  const itWindows = process.platform === 'win32' ? it : it.skip
+  const itCaseSensitive = process.platform === 'linux' ? it : it.skip
+
+  itWindows('on NTFS a wrong-case path inside the boundary is still ours', () => {
+    const base = mkdtempSync(path.join(tmpdir(), 'dsh-del-case-'))
+    try {
+      mkdirSync(path.join(base, 'dsh-home', 'inner'), { recursive: true })
+      expect(deletableWithin(path.join(base, 'DSH-HOME', 'INNER'), path.join(base, 'dsh-home'))).toBe(true)
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  itCaseSensitive('a case-variant sibling is NOT the boundary, not even by one letter', () => {
+    // On a case-sensitive filesystem `HOME` next to `home` is a different
+    // directory, and the old blanket lowercase() called it inside.
+    const base = mkdtempSync(path.join(tmpdir(), 'dsh-del-case-'))
+    try {
+      mkdirSync(path.join(base, 'home', 'inner'), { recursive: true })
+      mkdirSync(path.join(base, 'HOME', 'evil'), { recursive: true })
+      expect(deletableWithin(path.join(base, 'home', 'inner'), path.join(base, 'home'))).toBe(true)
+      expect(deletableWithin(path.join(base, 'HOME', 'evil'), path.join(base, 'home'))).toBe(false)
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
 })

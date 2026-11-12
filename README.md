@@ -2,7 +2,7 @@
 
 > **Two things to know before installing:**
 >
-> 1. **This is alpha software.** 0.1.x, one developer, Windows is the tested platform. It works end to end, and it will still surprise you; [rough edges reported](https://github.com/fuzzifikation/dsh-bridge/issues) are what makes it a beta.
+> 1. **This is alpha software.** 0.1.x, one developer; the install procedure and the harness are verified end to end on Windows and on Linux (Ubuntu). It will still surprise you; [rough edges reported](https://github.com/fuzzifikation/dsh-bridge/issues) are what makes it a beta.
 > 2. **It requires vLLM-Copilot — and that is where you configure your models.** Your servers, models, modes, and personalities all live in the [vLLM-Copilot](https://github.com/fuzzifikation/vLLM-Copilot) extension's settings; VS Code installs it automatically alongside the bridge. This bridge deliberately has no model configuration of its own: no registry configured there, nothing to boot here.
 
 Run the [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) (dsh) agent loop entirely on your own vLLM or OpenRouter servers. No DeepSeek account, no credential setup, no vendor login. Your models come from that vLLM-Copilot registry, already configured and working in VS Code — and the harness runs on the vLLM-Copilot core, which is where personalities, served-model filtering, sampling configs, and your token totals come from.
