@@ -5,7 +5,7 @@
  * fail with cmd.exe's standard "not recognized as an internal or external
  * command", and a Node 18 machine installed the whole dsh tree happily and
  * then died inside dsh's own engine guard. Both are machine facts the bridge
- * can ask in half a second with two `--version` calls, so the answer arrives
+ * can ask in half a second with three `--version` calls, so the answer arrives
  * as a named tool and a fix, not as a forensics exercise.
  *
  * Checks never throw and never hang a caller: every probe is awaited with a
@@ -28,7 +28,7 @@ const execFileAsync = promisify(execFile)
 export const NODE_MAJOR_MIN = 22
 
 export interface PrereqCheck {
-  name: 'node' | 'npm'
+  name: 'node' | 'npm' | 'pnpm'
   ok: boolean
   /** One honest line: the version found, or the tool that is not there. */
   summary: string
@@ -99,5 +99,25 @@ export async function runPreflight(): Promise<PrereqCheck[]> {
       fix: 'Install Node.js 22 or newer from https://nodejs.org (npm ships with it) and restart the editor. If Node is already installed, its directory must be on PATH.',
     })
   }
+  // pnpm is not a formality we chose: dsh installs every profile plugin by
+  // forwarding `pnpm add` (observed: exit 127 "pnpm was not found" on a
+  // pnpm-free machine, AFTER the multi-minute npm runtime install). npm does
+  // not ship it, so it is a third prerequisite with its own name and fix,
+  // asked before any download rather than discovered at the plugin step.
+  try {
+    // Shell on purpose, same law as npm: pnpm is a `.cmd` shim on Windows.
+    const { stdout } = await execAsync('pnpm --version', { timeout: 20_000 })
+    const version = stdout.trim()
+    checks.push(
+      version
+        ? { name: 'pnpm', ok: true, summary: `pnpm ${version}` }
+        : { name: 'pnpm', ok: false, summary: 'pnpm answered "pnpm --version" with nothing', fix: pnpmFix },
+    )
+  } catch {
+    checks.push({ name: 'pnpm', ok: false, summary: 'no pnpm found on PATH', fix: pnpmFix })
+  }
   return checks
 }
+
+const pnpmFix =
+  'Install pnpm and restart the editor: "npm install -g pnpm" works on every platform ("corepack enable" also provides it). The harness installs its plugins with pnpm; npm cannot do this step.'

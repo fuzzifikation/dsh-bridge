@@ -18,7 +18,7 @@ You install the extension. It installs a pinned `@deepseek-ai/dsh` into a privat
 
 ## Requirements
 
-- Node.js 22+ with `npm` on PATH (the extension installs the pinned harness with it; dsh's own packages require Node 22). The bridge checks both before the first download and names what is missing.
+- Node.js 22+ with `npm` **and** `pnpm` on PATH (npm installs the pinned harness; dsh installs its profile plugins through pnpm, which npm does not ship). The bridge checks all three before the first download and names what is missing — `npm install -g pnpm` is the one-liner that fixes the third.
 - The [vLLM-Copilot](https://github.com/fuzzifikation/vLLM-Copilot) extension with at least one working server and model — **required, not a convenience**. VS Code installs it alongside the bridge automatically; the bridge's whole model path runs on its core, so a machine without a registry gets a clear message and no harness. Extra providers *inside* the harness are welcome ([see FAQ](#can-i-add-other-providers-inside-the-harness)); a harness without vLLM-Copilot is not a mode this product has.
 
 ## Alpha testing

@@ -24,11 +24,13 @@ describe('prerequisite preflight', () => {
     // runtime. The floor verdict must track the runner's own major: an
     // environment below it is a fail the message names, never a false pass.
     const checks = await runPreflight()
-    expect(checks.map((c) => c.name).sort()).toEqual(['node', 'npm'])
+    expect(checks.map((c) => c.name).sort()).toEqual(['node', 'npm', 'pnpm'])
     const runnerMajor = parseNodeMajor(process.versions.node)
     const node = checks.find((c) => c.name === 'node')
     expect(node.ok).toBe(runnerMajor >= NODE_MAJOR_MIN)
     if (!node.ok) expect(node.fix).toMatch(/restart the editor/i)
+    const pnpm = checks.find((c) => c.name === 'pnpm')
+    if (!pnpm.ok) expect(pnpm.fix).toMatch(/pnpm/i)
     for (const check of checks) expect(check.summary.length).toBeGreaterThan(0)
   })
 })
