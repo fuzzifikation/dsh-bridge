@@ -30,7 +30,11 @@ describe('prerequisite preflight', () => {
     expect(node.ok).toBe(runnerMajor >= NODE_MAJOR_MIN)
     if (!node.ok) expect(node.fix).toMatch(/restart the editor/i)
     const pnpm = checks.find((c) => c.name === 'pnpm')
-    if (!pnpm.ok) expect(pnpm.fix).toMatch(/pnpm/i)
+    if (!pnpm.ok) {
+      expect(pnpm.fix).toMatch(/pnpm/i)
+      // The ask must be copy-able: the human installs it, the bridge only hands over the command.
+      expect(pnpm.command).toBe('npm install -g pnpm')
+    }
     for (const check of checks) expect(check.summary.length).toBeGreaterThan(0)
   })
 })

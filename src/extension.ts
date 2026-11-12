@@ -746,6 +746,27 @@ const bridge = new Bridge({
     return (await preflightChecks).filter((check) => !check.ok)
   }
 
+  /**
+   * The ask. Every missing prerequisite gets its own sentence and its own
+   * fix (a fixes[0]-only message swallowed the pnpm line whenever node was
+   * missing too), and a machine-installable command is offered for COPYING,
+   * never executed: installing tools on the machine stays the human's call
+   * (owner ruling 2026-11-12). After the fix, the editor restart is not
+   * folklore; the host's PATH is frozen at launch.
+   */
+  function announceMissingPrereqs(missing: PrereqCheck[], verb: string): void {
+    const sentences = missing.map((check) => `${check.summary}. ${check.fix ?? ''}`.trim()).join(' ')
+    const copyables = missing.filter((check) => check.command)
+    const copyLabel = (check: PrereqCheck): string => `Copy: ${check.command}`
+    void vscode.window
+      .showErrorMessage(`The DeepSeek Harness cannot ${verb} on this machine: ${sentences}`, ...copyables.map(copyLabel), 'Show Log')
+      .then((choice) => {
+        if (choice === 'Show Log') void output?.show()
+        const picked = copyables.find((check) => copyLabel(check) === choice)
+        if (picked?.command) void vscode.env.clipboard.writeText(picked.command)
+      })
+  }
+
   async function guardedStart(): Promise<string | undefined> {
     if (bridge.supervisor.running && bridge.supervisor.url) return bridge.supervisor.url
     // Prerequisites are named before any download starts. Without this gate a
@@ -754,15 +775,7 @@ const bridge = new Bridge({
     // engine floor installed the whole tree before dying downstream.
     const missing = await missingPrereqs()
     if (missing.length) {
-      const fixes = missing.map((check) => check.fix).filter((fix): fix is string => Boolean(fix))
-      void vscode.window
-        .showErrorMessage(
-          `The DeepSeek Harness cannot start on this machine: ${missing.map((check) => check.summary).join('; ')}. ${fixes[0] ?? ''}`.trim(),
-          'Show Log',
-        )
-        .then((choice) => {
-          if (choice === 'Show Log') void output?.show()
-        })
+      announceMissingPrereqs(missing, 'start')
       return undefined
     }
     // Best effort: a harness whose control channel failed to start still
@@ -912,15 +925,7 @@ const bridge = new Bridge({
   async function installOrUpdateHarness(): Promise<void> {
     const missing = await missingPrereqs()
     if (missing.length) {
-      const fixes = missing.map((check) => check.fix).filter((fix): fix is string => Boolean(fix))
-      void vscode.window
-        .showErrorMessage(
-          `The DeepSeek Harness cannot be installed on this machine: ${missing.map((check) => check.summary).join('; ')}. ${fixes[0] ?? ''}`.trim(),
-          'Show Log',
-        )
-        .then((choice) => {
-          if (choice === 'Show Log') void output?.show()
-        })
+      announceMissingPrereqs(missing, 'be installed')
       return
     }
     let pin: string

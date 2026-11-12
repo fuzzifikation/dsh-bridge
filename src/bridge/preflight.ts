@@ -34,6 +34,13 @@ export interface PrereqCheck {
   summary: string
   /** What the human must do, including the editor restart the fix implies. Absent when ok. */
   fix?: string
+  /**
+   * The exact paste-able command that performs the fix, offered for copying
+   * but never run by the bridge: installing a tool ON the machine is the
+   * human's decision (owner ruling 2026-11-12), so the product asks with the
+   * command in the clipboard's reach instead of reaching for the shell.
+   */
+  command?: string
 }
 
 /** `v22.11.0` → 22; anything without a leading number is not a node version. */
@@ -111,13 +118,14 @@ export async function runPreflight(): Promise<PrereqCheck[]> {
     checks.push(
       version
         ? { name: 'pnpm', ok: true, summary: `pnpm ${version}` }
-        : { name: 'pnpm', ok: false, summary: 'pnpm answered "pnpm --version" with nothing', fix: pnpmFix },
+        : { name: 'pnpm', ok: false, summary: 'pnpm answered "pnpm --version" with nothing', fix: pnpmFix, command: PNPM_COMMAND },
     )
   } catch {
-    checks.push({ name: 'pnpm', ok: false, summary: 'no pnpm found on PATH', fix: pnpmFix })
+    checks.push({ name: 'pnpm', ok: false, summary: 'no pnpm found on PATH', fix: pnpmFix, command: PNPM_COMMAND })
   }
   return checks
 }
 
+const PNPM_COMMAND = 'npm install -g pnpm'
 const pnpmFix =
-  'Install pnpm and restart the editor: "npm install -g pnpm" works on every platform ("corepack enable" also provides it). The harness installs its plugins with pnpm; npm cannot do this step.'
+  `Install pnpm and restart the editor: "${PNPM_COMMAND}" works on every platform ("corepack enable" also provides it, and a global npm install may need sudo where Node is system-owned). The harness installs its plugins with pnpm; npm cannot do this step.`
