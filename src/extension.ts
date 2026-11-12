@@ -121,12 +121,40 @@ function ensureEmbed(): Promise<string> {
   return embedStart
 }
 
+/**
+ * The address a CLIENT-side surface (webview Chromium, external browser,
+ * built-in browser view) can actually reach for a server-side loopback URL.
+ * In a local window asExternalUri echoes it back; in remote SSH/WSL windows
+ * it is the port-forwarded address, and calling it is what asks the workbench
+ * to hold that tunnel open. The remote black-panel bug of 2026-11-12 was
+ * exactly a panel aimed at the SERVER's 127.0.0.1 from the CLIENT's Chromium.
+ */
+async function toExternal(url: string): Promise<string> {
+  try {
+    const ext = await vscode.env.asExternalUri(vscode.Uri.parse(url))
+    return ext.toString().replace(/\/+$/, '')
+  } catch (err) {
+    // Origin only: the harness URL carries its token, and logs are for strangers.
+    const safe = (() => {
+      try {
+        return vscode.Uri.parse(url).authority
+      } catch {
+        return 'an unparseable URL'
+      }
+    })()
+    log().warn(`could not resolve an external address for ${safe}: ${(err as Error).message}`)
+    return url.replace(/\/+$/, '')
+  }
+}
+
 /** Aim the proxy at a harness URL and hand back its stable root (undefined on failure). */
 async function embedRootFor(url: string): Promise<string | undefined> {
   try {
     const root = await ensureEmbed()
     embed?.setTarget(url)
-    return root
+    const shown = await toExternal(root)
+    embed?.allowOrigin(shown)
+    return shown
   } catch (err) {
     log().warn(`embed proxy did not start: ${(err as Error).message}`)
     return undefined
@@ -363,7 +391,7 @@ async function openHarnessUrl(url: string, fresh = false): Promise<void> {
     }
   }
   if (mode === 'external') {
-    await vscode.env.openExternal(vscode.Uri.parse(url))
+    await vscode.env.openExternal(vscode.Uri.parse(await toExternal(url)))
     return
   }
   const commands = await vscode.commands.getCommands(true)
@@ -374,7 +402,9 @@ async function openHarnessUrl(url: string, fresh = false): Promise<void> {
       : undefined
   if (door) {
     try {
-      await vscode.commands.executeCommand(door, url)
+      // The browser view lives client-side too: in a remote window it dials
+      // the tunnel, never the server's loopback.
+      await vscode.commands.executeCommand(door, await toExternal(url))
       return
     } catch {
       void vscode.window.showInformationMessage(
@@ -386,7 +416,7 @@ async function openHarnessUrl(url: string, fresh = false): Promise<void> {
       'This editor build provides no embedded browser view, so the harness opens in the system browser instead.',
     )
   }
-  await vscode.env.openExternal(vscode.Uri.parse(url))
+  await vscode.env.openExternal(vscode.Uri.parse(await toExternal(url)))
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {

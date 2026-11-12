@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.6
+
+- **The harness panel works in remote (SSH) windows.** The webview's browser lives on your machine while the harness and its embed proxy live on the remote host, so the panel used to dial *your* loopback address, find nobody home, and sit there in eloquent black. Local and WSL windows only ever worked because WSL forwards loopback by accident of architecture. The panel (and the app-window, built-in-browser, and external-browser doors) now aim at the address the editor itself forwards for the proxy, and the embed proxy accepts that forwarded origin as the panel's own — every cross-site drive-by still gets the same 403 it always got.
+
 ## 0.1.5
 
 (Honest history: this content was briefly packaged as 0.1.4 during the same day's work; 0.1.4 never reached the Marketplace, so the number moved instead of the history.)

@@ -2,7 +2,7 @@
 
 > **Two things to know before installing:**
 >
-> 1. **This is alpha software.** 0.1.x, one developer; the install procedure and the harness are verified end to end on Windows and on Linux (Ubuntu). It will still surprise you; [rough edges reported](https://github.com/fuzzifikation/dsh-bridge/issues) are what makes it a beta.
+> 1. **This is alpha software.** 0.1.x, one developer; the install procedure and the harness are verified end to end on Windows and on Linux (Ubuntu), in local and remote (WSL, SSH) VS Code windows. It will still surprise you; [rough edges reported](https://github.com/fuzzifikation/dsh-bridge/issues) are what makes it a beta.
 > 2. **It requires vLLM-Copilot — and that is where you configure your models.** Your servers, models, modes, and personalities all live in the [vLLM-Copilot](https://github.com/fuzzifikation/vLLM-Copilot) extension's settings; VS Code installs it automatically alongside the bridge. This bridge deliberately has no model configuration of its own: no registry configured there, nothing to boot here.
 
 Run the [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) (dsh) agent loop entirely on your own vLLM or OpenRouter servers. No DeepSeek account, no credential setup, no vendor login. Your models come from that vLLM-Copilot registry, already configured and working in VS Code — and the harness runs on the vLLM-Copilot core, which is where personalities, served-model filtering, sampling configs, and your token totals come from.
@@ -62,7 +62,7 @@ The honest boundary: **usage accounting only sees vLLM-Copilot traffic.** The da
 
 ## Status
 
-Alpha (0.1.x), one developer. The loop works end to end: your registry becomes the harness's model list, models your servers stopped serving are hidden, the harness opens as a chromeless tab inside VS Code — per-chat tab titles, VS Code chords answering from inside the frame — the agent can call editor tools (diagnostics, open files and diffs, terminal commands, questions back to you), and harness traffic lands in the vLLM-Copilot usage ledger. Windows is the tested platform; others are untested. The design law for this repo (architecture, owner rulings, verification gates) lives in [docs/dsh-bridge-plan.md](docs/dsh-bridge-plan.md), this repo's own since 2026-10-08.
+Alpha (0.1.x), one developer. The loop works end to end: your registry becomes the harness's model list, models your servers stopped serving are hidden, the harness opens as a chromeless tab inside VS Code — per-chat tab titles, VS Code chords answering from inside the frame — the agent can call editor tools (diagnostics, open files and diffs, terminal commands, questions back to you), and harness traffic lands in the vLLM-Copilot usage ledger. Windows and Linux (Ubuntu) are verified end to end, in local windows and in remote ones over WSL and SSH (the panel rides the editor's own port forwarding). The design law for this repo (architecture, owner rulings, verification gates) lives in [docs/dsh-bridge-plan.md](docs/dsh-bridge-plan.md), this repo's own since 2026-10-08.
 
 ## Documentation
 

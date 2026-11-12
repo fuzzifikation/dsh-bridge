@@ -106,3 +106,31 @@ it('the embed proxy gate refuses foreign browser traffic and keeps every panel r
     harness.server.close()
   }
 })
+
+it('a forwarded remote window is the panel, an unregistered origin is still a drive-by', async () => {
+  const harness = await fakeHarness()
+  const proxy = new EmbedProxy({ port: 0, log })
+  const addr = await proxy.listen()
+  proxy.setTarget(`${harness.origin}/?token=***`)
+  // What asExternalUri hands a remote window: the forwarded local port, not
+  // the server-side one the proxy actually listens on.
+  const tunneled = 'http://127.0.0.1:59999'
+  proxy.allowOrigin(tunneled)
+  try {
+    // The panel's same-origin fetch, arriving with the tunnel origin: forwarded with the jar.
+    let r = await fetch(`${addr}/api/turn`, {
+      headers: { origin: tunneled, 'sec-fetch-site': 'same-origin', 'sec-fetch-dest': 'empty' },
+    })
+    expect(r.status).toBe(200)
+    // The chord beacon from the tunnel origin: rings the workbench.
+    r = await fetch(`${addr}/__dsh-key?c=Ctrl%2BP`, { headers: { origin: tunneled, 'sec-fetch-site': 'same-origin' } })
+    expect(r.status).toBe(204)
+    // A foreign origin that merely guesses the tunnel shape: still refused.
+    r = await fetch(`${addr}/api/turn`, { method: 'POST', headers: { origin: 'http://127.0.0.1:60001' } })
+    expect(r.status).toBe(403)
+    expect(harness.seen.some((s) => s.url === '/api/turn' && s.cookie !== 'dsh_session=s3cret')).toBe(false)
+  } finally {
+    proxy.close()
+    harness.server.close()
+  }
+})

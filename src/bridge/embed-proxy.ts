@@ -34,7 +34,11 @@
  * can already read the token from the pid record); the proxy adds no new
  * exposure, and strips nothing from the harness's own request checks — Host
  * and Origin are rewritten to the harness's own origin, which is exactly
- * what its loopback trust check expects.
+ * what its loopback trust check expects. In a remote window the panel's
+ * Chromium sits on the CLIENT and reaches this loopback only through the
+ * workbench's port forwarding; `allowOrigin` registers the forwarded origin
+ * the extension resolved via asExternalUri, so panel traffic keeps its
+ * same-origin word and a stranger on another origin still eats the 403.
  *
  * No `vscode` import: plain node, testable like `control-server.ts`.
  */
@@ -81,6 +85,15 @@ export class EmbedProxy {
   private login: Promise<boolean> | undefined
   /** Live WebSocket relay legs, so close() can tear down what pipe() alone leaves hanging. */
   private readonly relays = new Set<import('node:stream').Duplex>()
+  /**
+   * Extra origins the panel legitimately carries when the webview's Chromium
+   * fetches through a port-forwarding tunnel (remote SSH/WSL windows: the UI
+   * process is on the CLIENT, the proxy on the SERVER, and the forwarded local
+   * port may not equal the loopback port down here). The extension registers
+   * what asExternalUri handed it; nothing else turns a same-origin fetch into
+   * a jar ride.
+   */
+  private readonly forwardedOrigins = new Set<string>()
 
   constructor(private readonly deps: EmbedProxyDeps) {}
 
@@ -213,6 +226,21 @@ export class EmbedProxy {
     return this.address
   }
 
+  /**
+   * Whitelist one origin the webview really carries when its requests reach
+   * this proxy through a forwarded port (remote windows). Called by the
+   * extension with the origin `asExternalUri` returned for this proxy root.
+   * Idempotent; clearing happens only with close(), a fresh proxy.
+   */
+  allowOrigin(origin: string): void {
+    if (!origin) return
+    const normalized = origin.replace(/\/+$/, '')
+    if (normalized && !this.forwardedOrigins.has(normalized)) {
+      this.forwardedOrigins.add(normalized)
+      this.deps.log.info(`embed proxy accepts forwarded origin ${normalized}`)
+    }
+  }
+
   /** Rewrite absolute same-target Location headers so the browser stays on the proxy. */
   private rewriteLocation(location: string | undefined): string | undefined {
     if (!location || !this.target || !this.address) return location
@@ -235,7 +263,7 @@ export class EmbedProxy {
    */
   private crossSite(req: IncomingMessage): boolean {
     const origin = req.headers.origin
-    if (typeof origin === 'string' && origin !== this.address) return true
+    if (typeof origin === 'string' && origin !== this.address && !this.forwardedOrigins.has(origin.replace(/\/+$/, ''))) return true
     const site = req.headers['sec-fetch-site']
     if (typeof site !== 'string' || site === 'same-origin' || site === 'none') return false
     const method = (req.method ?? 'GET').toUpperCase()
