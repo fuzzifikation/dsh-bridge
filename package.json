@@ -1,7 +1,7 @@
 {
   "name": "dsh-bridge",
   "displayName": "DeepSeek Harness Bridge — run on your own models",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "preview": true,
   "type": "module",
   "description": "Alpha testing. Requires vLLM-Copilot — that is where your local models are configured. Then run the DeepSeek Harness (dsh) on your own models: your servers, your token totals, no DeepSeek account.",
@@ -122,11 +122,17 @@
     "icons": {
       "dsh-bridge-whale": {
         "description": "DSH whale, spouting: the harness is running.",
-        "default": { "fontPath": "./resources/dsh-bridge-icons.woff2", "fontCharacter": "\\E001" }
+        "default": {
+          "fontPath": "./resources/dsh-bridge-icons.woff2",
+          "fontCharacter": "\\E001"
+        }
       },
       "dsh-bridge-whale-off": {
         "description": "DSH whale at rest: the harness is stopped.",
-        "default": { "fontPath": "./resources/dsh-bridge-icons.woff2", "fontCharacter": "\\E002" }
+        "default": {
+          "fontPath": "./resources/dsh-bridge-icons.woff2",
+          "fontCharacter": "\\E002"
+        }
       }
     },
     "menus": {
