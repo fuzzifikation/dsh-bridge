@@ -1,5 +1,7 @@
 # dsh Bridge Plan: Local DeepSeek Harness on the vLLM-Copilot Registry
 
+**Merger direction (owner, 2026-11-14):** the bridge moves into vLLM-Copilot as an optional feature, with Copilot-free use in VSCodium required; this repository and its Marketplace listing are retired afterwards. The [extension merger plan](https://github.com/fuzzifikation/vLLM-Copilot/blob/main/docs/extension-merger-plan.md) owns the steps. It supersedes the separate-extension strategy below; current runtime and surface requirements remain in force until the merger ships.
+
 **Status:** Ruled plan (owner decisions below are standing law for this feature). Adapter contract spike-verified 2026-10-03 against dsh `0.2.0-rc.2` (dsh-llm `LlmAdapter`); pi-ai HTTP wire facts archived from the 2026-10-01 spike.
 **Supersedes:** the free-form bridge entry that lived in [feature-ideas.md](https://github.com/fuzzifikation/vLLM-Copilot/blob/main/docs/feature-ideas.md).
 **Home:** moved from the vLLM-Copilot docs into this repo on 2026-10-08 (owner ruling) — the law of a product lives where the product is built.
